@@ -13,6 +13,7 @@ import { CityRenderer } from './render.ts';
 import { Chips } from './chips.ts';
 import { Impacts } from './impacts.ts';
 import { skyline } from './skyline.ts';
+import { StreetDetails } from './street-details.ts';
 import { Particles } from './particles.ts';
 import { CitySky } from './sky.ts';
 import { SpaceSky } from './space.ts';
@@ -101,7 +102,7 @@ const canvas = document.querySelector('#view') as HTMLCanvasElement;
 /** Phones and tablets get thumb sticks and buttons (touch.ts) and start a notch lower in quality. */
 const touchDevice = wantsTouch();
 preventZoom();
-const settings: Settings = { sensitivity: 1, fov: 80, invertY: false, quality: touchDevice ? 'medium' : 'high', graphics: 'auto', volume: 0.7, hour: 18, smoothing: false, dof: true, sunRays: true };
+const settings: Settings = { sensitivity: 1, fov: 80, invertY: false, quality: touchDevice ? 'medium' : 'high', graphics: 'auto', volume: 0.7, hour: 17, smoothing: false, dof: true, sunRays: true };
 try {
   const saved = JSON.parse(localStorage.getItem('city.settings') ?? '{}') as Partial<Settings>;
   // Settings saved before the device tuning had a fixed quality: they start on Auto
@@ -166,7 +167,6 @@ const mission = SCENE === 'city' ? new DemolitionMission({
   },
 }) : null;
 mission?.mountMenu(hud.menu);
-if (!testing) mission?.setMode('challenge');
 /** The thumb sticks and buttons, on touch devices (created with the input below). */
 let touch: TouchControls | null = null;
 hud.setLoading('正在建造街区…');
@@ -569,6 +569,7 @@ if (touch) {
 // The world
 // Built while the page loads (start): empty until then
 let city = emptyCity();
+let streetDetails: StreetDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
 touch?.setFlying(player.flying);
@@ -647,6 +648,8 @@ async function start(): Promise<void> {
   else {
     view.setStreets(city);
     view.scene.add(skyline(city));
+    streetDetails = new StreetDetails(city);
+    view.scene.add(streetDetails.object);
   }
   effects = startEffects();
   if (SCENE === 'space') {
@@ -806,6 +809,7 @@ async function rebuild(): Promise<void> {
   view.setPaints(city, physics.voxelOf);
   view.attachBalls(physics.spares);
   player.debrisCount = 0;
+  streetDetails?.reset(city);
   spawn();
   if (car) {
     placeCar();
@@ -2232,6 +2236,7 @@ function tick(now: number): void {
   sky.update(cam, now / 1000);
   view.heatClock.value = simTime;
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
+  streetDetails?.update(city.state);
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
@@ -2305,6 +2310,7 @@ if (testing) Object.assign(window, {
     get mission() { return mission; },
     get playing() { return playing; },
     get ready() { return ready; },
+    get streetDetails() { return streetDetails; },
     get freeLook() { return freeLook; },
     playerBoard,
   },
@@ -2330,6 +2336,7 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       gpu: view.adapterInfo,
       renderer: { calls: info.render.drawCalls, triangles: info.render.triangles, geometries: info.memory.geometries, textures: info.memory.textures, memoryBytes: info.memory.total },
       physics: { engine: 'three-avbd WebGPU', timestep: 1 / 60, voxels: city.count, loose: physics?.loose ?? 0 },
+      streetDetails: streetDetails?.diagnostics ?? null,
       state: mission?.snapshot ?? { mode: 'sandbox' },
     };
   },
@@ -2339,7 +2346,10 @@ addEventListener('resize', () => view.resize(innerWidth, innerHeight));
 // Leaving the page (each scene is a page of its own): its GPU memory goes now. iOS Safari keeps a page it leaves, for
 // Back, buffers and all, and the next scene, starting alongside it, ran out of memory ("range ... out of bounds").
 // A page it brings back from there has no GPU left, so it loads afresh.
-addEventListener('pagehide', () => (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy());
+addEventListener('pagehide', () => {
+  streetDetails?.dispose();
+  (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy();
+});
 addEventListener('pageshow', (e) => {
   if (e.persisted) location.reload();
 });

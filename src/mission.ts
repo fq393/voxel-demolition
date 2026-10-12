@@ -144,7 +144,7 @@ export class DemolitionMission {
     this.objective.querySelector('.mission-status')!.textContent = s.phase === 'ready' ? '进入场景后开始计时' : this.active ? (s.count >= s.target ? '目标达成 · 继续拆，冲更高分' : '每拆松一个方块 = 1 分') : '已暂停 · 返回场景继续';
     this.chooser?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mode === s.mode)));
     const description = this.chooser?.querySelector('.mission-description');
-    if (description) description.textContent = s.mode === 'challenge' ? '完整 90 秒冲分，每拆松一个方块得 1 分。结算后上传最高分。' : '随便逛，随便拆。自由模式练手，积分不上传排行榜。';
+    if (description) description.textContent = s.mode === 'challenge' ? '完整 90 秒冲分，每拆松一个方块得 1 分。结算后上传最高分。' : '没有倒计时，随便逛、慢慢拆。想重来就按 R；本局积分不上榜。';
   }
 
   private showResult(): void {

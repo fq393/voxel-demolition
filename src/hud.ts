@@ -393,7 +393,7 @@ export class Hud {
           ? '开车撞穿护栏，或下车用火箭清场。看台、轮胎、围墙，都能拆。'
           : space
             ? '在零重力里拆空间站。切断支架，看太阳翼飘走；轰开舱体，看碎块散进太空。'
-            : '先拆承重，再看整栋楼倒下。切割、爆破、慢动作，随你折腾。'
+            : '放下手头的事，拆掉眼前这栋楼。切割、爆破、慢动作，按你的节奏来。'
       }</p>
       <div class="buttons"><button class="play">开始拆除</button></div>
       <div class="grid tap">
@@ -426,7 +426,7 @@ export class Hud {
         <div class="row"><span>画质</span><select name="graphics"><option value="auto">自动（按设备适配）</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
         <div class="row tune"><span class="tuned"></span><button class="retune">重新检测设备</button></div>
       </details>
-      <a class="source" href="https://github.com/sbobyn/three-voxel-destruction" target="_blank" rel="noopener noreferrer">基于 sbobyn 的 MIT 开源项目 · 本地试玩改作</a>
+      <a class="source" href="https://github.com/fq393/voxel-demolition" target="_blank" rel="noopener noreferrer">开源代码 ↗ · 基于 sbobyn 的 MIT 项目改作</a>
     </div>`;
     document.body.append(this.menu);
     this.loading.className = 'loading';

@@ -1,0 +1,9 @@
+.git
+node_modules
+artifacts
+docs
+tests
+tests-gpu
+scripts
+.env*
+PLAY.md

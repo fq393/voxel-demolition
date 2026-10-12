@@ -1,21 +1,23 @@
 {
-  "name": "three-voxel-destruction",
+  "name": "voxel-demolition-local",
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@10.18.0",
+  "packageManager": "npm@11.16.0",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5320 --strictPort",
+    "dev": "vite --host 127.0.0.1 --port 5189 --strictPort",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "test:gpu": "node --experimental-transform-types --test tests-gpu/*.gpu.test.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm test:gpu && pnpm build",
+    "check": "npm run typecheck && npm test && npm run test:gpu && npm run build",
     "bench": "node --experimental-transform-types --no-warnings scripts/city-bench.ts",
-    "hdri-sun": "node --experimental-transform-types --no-warnings scripts/hdri-sun.ts"
+    "hdri-sun": "node --experimental-transform-types --no-warnings scripts/hdri-sun.ts",
+    "preview": "vite preview --host 127.0.0.1 --port 5189 --strictPort"
   },
   "dependencies": {
+    "@upstash/redis": "^1.39.0",
     "three": "0.186.0",
     "three-avbd": "^0.2.1"
   },
@@ -23,6 +25,7 @@
     "@types/node": "^25.0.0",
     "@types/three": "0.186.0",
     "@webgpu/types": "^0.1.74",
+    "pngjs": "^7.0.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.0",
     "webgpu": "0.6.1"

@@ -6,6 +6,7 @@ export default defineConfig({
     dedupe: ['three'],
   },
   server: {
+    proxy: { '/api': { target: 'http://127.0.0.1:5190', changeOrigin: false } },
     // WebGPU needs a secure page, so a phone on the network reaches the dev server through an
     // HTTPS tunnel (cloudflared tunnel --url http://localhost:5320): let its hostnames in
     allowedHosts: ['.trycloudflare.com'],

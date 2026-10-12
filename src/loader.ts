@@ -20,6 +20,13 @@ export class Loader {
   private readonly stages: Stage[];
 
   constructor(stages: Stage[]) {
+    const scene = new URLSearchParams(location.search).get('scene');
+    const title = scene === 'track' ? '赛道拆除' : scene === 'space' ? '轨道拆除' : '拆楼实验室';
+    (this.root.querySelector('h1') as HTMLElement).textContent = title;
+    (this.root.querySelector('.sub') as HTMLElement).textContent = scene === 'track'
+      ? '正在搭建一条可以撞穿的赛道'
+      : scene === 'space' ? '正在组装一座可以拆开的空间站' : '正在搭建一座可以拆掉的城市';
+    document.title = `${title} · 本地试玩`;
     this.stages = stages;
     this.total = stages.reduce((a, s) => a + s.weight, 0);
     const list = this.root.querySelector('.steps') as HTMLElement;
@@ -64,7 +71,7 @@ export class Loader {
     });
     this.fill.style.width = '100%';
     this.pct.textContent = '100%';
-    this.phase.textContent = 'Ready';
+    this.phase.textContent = '准备好了';
     await new Promise((r) => setTimeout(r, 250));
     this.root.classList.add('done');
     setTimeout(() => this.root.remove(), 600);
@@ -76,12 +83,12 @@ export class Loader {
     const gpu = /webgpu|adapter|gpu|device/i.test(message);
     const insecure = /secure page/i.test(message);
     this.root.classList.add('failed');
-    this.phase.textContent = 'Could not start';
+    this.phase.textContent = '暂时没能启动';
     this.error.innerHTML = insecure
-      ? `Browsers only allow WebGPU on secure pages. Open this page over https:// (or on localhost on the computer running it).<small></small>`
+      ? `浏览器要求在安全页面使用 WebGPU。请通过 https:// 或本机 localhost 打开。<small></small>`
       : gpu
-      ? `This browser or device can't run Voxel City: it needs WebGPU. Try the latest Chrome or Edge, or Safari on iOS 26 or macOS 26 (on older iOS, turn on WebGPU in Settings › Safari › Advanced › Feature Flags). Meanwhile, <a href="${REPO}">watch it and read the code</a>.<small></small>`
-      : `Something went wrong while starting. Reloading the page may help.<small></small>`;
+      ? `这个浏览器或设备暂时无法运行游戏，需要支持 WebGPU。可以尝试新版 Chrome 或 Edge，并检查硬件加速是否开启。也可以先<a href="${REPO}">看看原项目的演示和代码</a>。<small></small>`
+      : `启动时遇到了问题，可以刷新页面再试一次。<small></small>`;
     (this.error.querySelector('small') as HTMLElement).textContent = message;
   }
 }

@@ -1,22 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>Voxel City</title>
-    <meta name="description" content="A destructible voxel city, race track and space station: every voxel a body in the AVBD solver on your GPU." />
-    <!-- Link previews (X, Discord, Slack...): the image needs an absolute URL -->
+    <title>拆楼实验室 · 本地试玩</title>
+    <meta name="description" content="可破坏的体素城市、赛道与空间站。切割、爆破、拆承重，再用慢动作看整座楼倒下。" />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://three-voxel-destruction.vercel.app/" />
-    <meta property="og:title" content="Voxel City" />
-    <meta property="og:description" content="Cut, blast and topple a voxel city, crash a supercar through a race track, or break up a space station in zero g: every voxel a rigid body simulated on your GPU. In the browser, with WebGPU." />
-    <meta property="og:image" content="https://three-voxel-destruction.vercel.app/og.jpg" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="og:title" content="拆楼实验室 · 本地试玩" />
+    <meta property="og:description" content="切割、爆破、慢动作。基于 MIT 开源项目的本地试玩改作。" />
     <style>
       /* No zooming, ever: touch-action isn't inherited, so every element says so (iOS ignores
          the viewport's user-scalable). The menu still scrolls up and down. */
@@ -35,7 +29,7 @@
         height: 100%;
         overflow: hidden;
         background: #0e1014;
-        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        font-family: 'Inter', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
         color: #f3efe6;
       }
       #view {
@@ -169,10 +163,10 @@
   <body>
     <div id="loader">
       <div class="card">
-        <h1>Voxel City</h1>
-        <p class="sub">Every voxel a body in the AVBD solver, on your GPU</p>
+        <h1>拆楼实验室</h1>
+        <p class="sub">正在搭建一座可以拆掉的城市</p>
         <div class="track"><div class="fill"></div></div>
-        <div class="row"><span class="phase">Starting…</span><span class="pct">0%</span></div>
+        <div class="row"><span class="phase">准备场景…</span><span class="pct">0%</span></div>
         <ul class="steps"></ul>
         <div class="error"></div>
       </div>

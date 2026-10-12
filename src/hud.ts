@@ -36,6 +36,17 @@ export interface Settings {
   sunRays: boolean;
 }
 
+/** Display labels stay separate from tool IDs used by the simulation. */
+const TOOL_LABELS: Record<string, string> = {
+  Hammer: '锤子',
+  Laser: '切割激光',
+  Rocket: '火箭筒',
+  Charge: '爆破炸药',
+  'Wrecking ball': '破拆球',
+  'Machine gun': '机枪',
+};
+const toolLabel = (name: string): string => TOOL_LABELS[name] ?? name;
+
 const CSS = `
 .hud { position: fixed; inset: 0; z-index: 1; pointer-events: none; user-select: none; }
 .hud .cross { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); }
@@ -127,16 +138,23 @@ body.touch .menu .desk, body:not(.touch) .menu .tap { display: none; }
 .hud .speedo .boost i { display: block; height: 100%; background: #ff8a3d; }
 .hud.driving .dock, .hud.driving .tip, .hud.driving .picked { display: none; }
 .hud.driving .speedo { display: block; }
-.hud .keys { position: absolute; left: 14px; top: 12px; font-size: 11.5px; line-height: 1.6; opacity: 0.7; text-shadow: 0 1px 3px #000; }
+.hud .keys { position: absolute; left: 14px; top: 160px; font-size: 11px; line-height: 1.6; opacity: 0.7; text-shadow: 0 1px 3px #000; }
 .hud .keys b { display: inline-block; min-width: 18px; padding: 0 4px; border-radius: 4px; background: rgba(255,255,255,0.14); text-align: center; margin-right: 4px; font-weight: 600; }
 .menu { position: fixed; inset: 0; z-index: 10; overflow-y: auto; display: flex; align-items: safe center; justify-content: center; padding: 12px 0; box-sizing: border-box; background: radial-gradient(ellipse at center, rgba(10,12,16,0.55), rgba(6,7,10,0.85)); backdrop-filter: blur(4px); }
 .menu[hidden] { display: none; }
-.menu .card { width: min(460px, 92vw); padding: 26px 28px; border-radius: 16px; background: rgba(22,24,30,0.92); border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.menu .card { width: min(460px, 92vw); padding: 24px 28px; box-sizing: border-box; border-radius: 16px; background: rgba(22,24,30,0.92); border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
 .menu h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: -0.01em; }
 .menu p { margin: 0 0 18px; opacity: 0.7; font-size: 13.5px; line-height: 1.5; }
 .menu button.play { width: 100%; padding: 13px; border: 0; border-radius: 10px; background: #ff8a3d; color: #1a0f06; font: 700 15px inherit; font-family: inherit; cursor: pointer; }
 .menu button.play:hover { background: #ff9d57; }
-.menu .buttons { display: flex; gap: 8px; }
+.menu .buttons { display: flex; gap: 8px; margin: 16px 0 12px; }
+.menu button.play:disabled { opacity: 0.45; cursor: wait; }
+.menu details { border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px; margin-top: 12px; }
+.menu summary { font-size: 12px; color: #eac694; cursor: pointer; }
+.menu .source { display: block; margin-top: 16px; font-size: 10px; line-height: 1.6; color: rgba(243,239,230,0.5); text-decoration: none; }
+.menu .source:hover { color: #ffb347; }
+.menu .reset-help { font-size: 11px; margin: 8px 0 0; opacity: 0.5; }
+@media (max-width: 480px) { .menu .card { padding: 20px; } .menu .row input[type=range] { width: min(180px, 48vw); } }
 .menu .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 12px 0; font-size: 13px; }
 .menu .row input[type=range] { width: 200px; accent-color: #ff8a3d; }
 .menu .row select { background: #2a2d35; color: inherit; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 4px 8px; font: inherit; }
@@ -164,25 +182,26 @@ body.touch .topbar kbd { display: none; }
 
 /** The key help on foot, and in the car. */
 const ON_FOOT = [
-  ['WASD', 'move'],
-  ['Mouse', 'look · L use · R aim'],
-  ['Space / Q', 'up / down (fly), jump (walk)'],
-  ['Shift', 'boost · Alt creep'],
-  ['Wheel', 'switch tool · hold Tab: tool wheel'],
-  ['F', 'fly / walk'],
-  ['X', 'slow motion'],
-  ['Esc', 'menu'],
+  ['WASD', '移动'],
+  ['鼠标', '转向 · 左键发射 · 右键瞄准'],
+  ['右键拖动', '无法锁定鼠标时转向'],
+  ['Space / Q', '上升 / 下降（飞行）· 跳跃（步行）'],
+  ['Shift', '加速 · Alt 慢行'],
+  ['滚轮', '切换工具 · 按住 Tab 打开工具盘'],
+  ['F', '飞行 / 步行'],
+  ['X', '慢动作'],
+  ['Esc / R', '暂停 / 重置场景'],
 ];
 const DRIVING = [
-  ['W / S', 'throttle · brake, reverse'],
-  ['A / D', 'steer'],
-  ['Space', 'handbrake'],
-  ['B', 'boost'],
-  ['Mouse L', 'rockets'],
-  ['Mouse R', 'machine guns'],
-  ['F', 'get out'],
-  ['X', 'slow motion'],
-  ['Esc', 'menu'],
+  ['W / S', '油门 · 刹车 / 倒车'],
+  ['A / D', '转向'],
+  ['Space', '手刹'],
+  ['B', '加速'],
+  ['鼠标左键', '火箭'],
+  ['鼠标右键', '机枪'],
+  ['F', '下车'],
+  ['X', '慢动作'],
+  ['Esc', '暂停'],
 ];
 
 export class Hud {
@@ -242,12 +261,12 @@ export class Hud {
     keys.className = 'keys';
     this.setKeys(ON_FOOT);
     this.speedo.className = 'speedo';
-    this.speedo.innerHTML = `<div class="gear">1</div><div class="v">0</div><div class="u">KM/H</div><div class="health"><i></i></div><div class="boost"><i></i></div><div class="pods"><span>RKT</span><div class="pod"><i></i></div><div class="pod"><i></i></div></div>`;
+    this.speedo.innerHTML = `<div class="gear">1</div><div class="v">0</div><div class="u">KM/H</div><div class="health"><i></i></div><div class="boost"><i></i></div><div class="pods"><span>火箭</span><div class="pod"><i></i></div><div class="pod"><i></i></div></div>`;
     for (const [i, t] of tools.entries()) {
       const slot = document.createElement('div');
       slot.className = 'slot';
-      slot.title = t.name;
-      slot.innerHTML = `<div class="i">${t.icon}</div><div class="n">${t.name}</div>`;
+      slot.title = toolLabel(t.name);
+      slot.innerHTML = `<div class="i">${t.icon}</div><div class="n">${toolLabel(t.name)}</div>`;
       this.bar.append(slot);
       this.slots[i] = slot;
     }
@@ -266,7 +285,7 @@ export class Hud {
     const mouse = `<svg class="mouse" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="5"/><path class="roll" d="M12 7v3"/></svg>`;
     const how = this.how;
     how.className = 'how';
-    how.innerHTML = `<span>${mouse}Scroll to switch</span><span><b>Tab</b>hold for tool wheel</span>`;
+    how.innerHTML = `<span>${mouse}滚轮切换工具</span><span><b>Tab</b>按住打开工具盘</span>`;
     this.dock.className = 'dock';
     this.dock.append(carousel, how);
     // Tap a slot to take it; drag the strip sideways (finger or mouse) to slide through them
@@ -316,7 +335,7 @@ export class Hud {
       const a = this.wheelAngle(i);
       item.style.left = `${170 + Math.sin(a) * 118}px`;
       item.style.top = `${170 - Math.cos(a) * 118}px`;
-      item.innerHTML = `${t.icon}<span>${t.name}</span>`;
+      item.innerHTML = `${t.icon}<span>${toolLabel(t.name)}</span>`;
       item.addEventListener('mouseenter', () => this.highlight(i));
       item.addEventListener('mousedown', (e) => {
         e.stopPropagation();
@@ -368,42 +387,46 @@ export class Hud {
       return text ? `?${text}` : location.pathname;
     };
     this.menu.innerHTML = `<div class="card">
-      <h1>${track ? 'Voxel Circuit' : space ? 'Voxel Orbit' : 'Voxel City'}</h1>
+      <h1>${track ? '赛道拆除' : space ? '轨道拆除' : '拆楼实验室'}</h1>
       <p>${
         track
-          ? 'A race car on a circuit where every wall, stand and tyre is voxels in the AVBD solver, on your GPU. Drive through them, open up the machine guns and rockets, or get out and take the place apart on foot.'
+          ? '开车撞穿护栏，或下车用火箭清场。看台、轮胎、围墙，都能拆。'
           : space
-            ? 'A space station in orbit, every truss, module and solar wing voxels in the AVBD solver, on your GPU, with no gravity. Cut a wing loose and it drifts off; blow a module apart and it scatters into the dark.'
-            : "Every one of the city's voxels is a body in the AVBD solver, running on your GPU. Knock a hole in a tower and whatever it held up comes down."
+            ? '在零重力里拆空间站。切断支架，看太阳翼飘走；轰开舱体，看碎块散进太空。'
+            : '先拆承重，再看整栋楼倒下。切割、爆破、慢动作，随你折腾。'
       }</p>
+      <div class="buttons"><button class="play">开始拆除</button></div>
       <div class="grid tap">
-        <b>Left thumb</b><span>move · push past the ring to sprint</span>
-        <b>Right thumb</b><span>drag anywhere to look</span>
-        <b>Fire</b><span>use the tool in hand · drag from it to aim while firing</span>
-        <b>Aim</b><span>tap to zoom in, tap again to zoom out</span>
-        <b>Arrows</b><span>up and down (flying) · jump and crouch (walking)</span>
-        <b>Tools</b><span>swipe or tap the bar</span>
+        <b>左手</b><span>摇杆移动 · 推过圆环加速</span>
+        <b>右手</b><span>拖动画面转向</span>
+        <b>发射</b><span>使用工具 · 按住并拖动可边瞄准边发射</span>
+        <b>瞄准</b><span>轻点放大，再点恢复</span>
+        <b>上下箭头</b><span>飞行时升降 · 步行时跳跃 / 蹲下</span>
+        <b>工具栏</b><span>滑动或轻点切换</span>
       </div>
       <div class="grid desk">
-        <b>Mouse</b><span>look · left click uses the tool · right click aims</span>
-        <b>WASD</b><span>move where you look · Space/E up · Q/C down · Shift fast · Alt slow</span>
-        <b>Tools</b><span>scroll to switch, or hold Tab for the tool wheel</span>
-        <b>F</b><span>fly or walk (walking: Space jump, C crouch, Shift sprint)</span>
-        <b>X</b><span>slow motion (the player moves at full speed: fly round a collapse)</span>
-        <b>T · R</b><span>${space ? 'turn the sun' : 'time of day'} · rebuild the ${track ? 'track' : space ? 'station' : 'city'}</span>
-        ${track ? '<b>In the car</b><span>W/S throttle and brake · A/D steer · Space handbrake · B boost · left button: the rockets · right button: the machine guns · F gets out (and back in)</span>' : ''}
+        <b>鼠标</b><span>鼠标转向；无法锁定时，按住右键拖动视角，左键发射</span>
+        <b>WASD</b><span>移动 · Space/E 上升 · Q/C 下降 · Shift 加速</span>
+        <b>滚轮 / Tab</b><span>切换工具 / 按住打开工具盘</span>
+        <b>F / X</b><span>飞行与步行切换 / 慢动作</span>
+        <b>Esc / R</b><span>暂停 / 重置场景</span>
+        ${track ? '<b>驾车</b><span>W/S 油门与刹车 · A/D 转向 · Space 手刹 · B 加速 · 左键火箭 · 右键机枪 · F 上下车</span>' : ''}
       </div>
-      <div class="row"><span>Look sensitivity</span><input type="range" name="sensitivity" min="0.2" max="3" step="0.05"></div>
-      <div class="row"><span>Field of view</span><input type="range" name="fov" min="60" max="110" step="1"></div>
-      <div class="row"><span>Volume</span><input type="range" name="volume" min="0" max="1" step="0.05"></div>
-      <div class="row"><span>Time of day</span><input type="range" name="hour" min="6.5" max="21.5" step="0.1"></div>
-      <div class="row"><span>Invert look</span><input type="checkbox" name="invertY"></div>
-      <div class="row"><span>Mouse smoothing</span><input type="checkbox" name="smoothing"></div>
-      <div class="row"><span>Depth of field</span><input type="checkbox" name="dof"></div>
-      <div class="row"><span>Sun rays</span><input type="checkbox" name="sunRays"></div>
-      <div class="row"><span>Graphics</span><select name="graphics"><option value="auto">Auto (tuned for this device)</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
-      <div class="row tune"><span class="tuned"></span><button class="retune">Re-tune</button></div>
-      <div class="buttons"><button class="play">Play</button></div>
+      <p class="reset-help">拆过头了？按 R，把场景重新搭起来。</p>
+      <details>
+        <summary>画面与操作设置</summary>
+        <div class="row"><span>视角灵敏度</span><input type="range" name="sensitivity" min="0.2" max="3" step="0.05"></div>
+        <div class="row"><span>视野范围</span><input type="range" name="fov" min="60" max="110" step="1"></div>
+        <div class="row"><span>音量</span><input type="range" name="volume" min="0" max="1" step="0.05"></div>
+        <div class="row"><span>${space ? '太阳角度' : '一天中的时间'}</span><input type="range" name="hour" min="6.5" max="21.5" step="0.1"></div>
+        <div class="row"><span>反转纵向视角</span><input type="checkbox" name="invertY"></div>
+        <div class="row"><span>鼠标平滑</span><input type="checkbox" name="smoothing"></div>
+        <div class="row"><span>景深</span><input type="checkbox" name="dof"></div>
+        <div class="row"><span>阳光光束</span><input type="checkbox" name="sunRays"></div>
+        <div class="row"><span>画质</span><select name="graphics"><option value="auto">自动（按设备适配）</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+        <div class="row tune"><span class="tuned"></span><button class="retune">重新检测设备</button></div>
+      </details>
+      <a class="source" href="https://github.com/sbobyn/three-voxel-destruction" target="_blank" rel="noopener noreferrer">基于 sbobyn 的 MIT 开源项目 · 本地试玩改作</a>
     </div>`;
     document.body.append(this.menu);
     this.loading.className = 'loading';
@@ -437,7 +460,7 @@ export class Hud {
     bar.className = 'topbar';
     const current = track ? 'track' : space ? 'space' : '';
     const option = (value: string, name: string) => `<option value="${value}"${value === current ? ' selected' : ''}>${name}</option>`;
-    bar.innerHTML = `<label>Scene<select>${option('', 'City')}${option('track', 'Race track')}${option('space', 'Space station')}</select></label><span class="sep"></span><button class="reset" title="The scene as it started">Reset<kbd>R</kbd></button>`;
+    bar.innerHTML = `<label>场景<select>${option('', '城市')}${option('track', '赛道')}${option('space', '空间站')}</select></label><span class="sep"></span><button class="reset" title="重建整个场景">重置<kbd>R</kbd></button>`;
     const choice = bar.querySelector('select') as HTMLSelectElement;
     choice.addEventListener('change', () => location.assign(link(choice.value || null)));
     (bar.querySelector('.reset') as HTMLButtonElement).addEventListener('click', () => this.onReset());
@@ -469,7 +492,7 @@ export class Hud {
     slot.classList.remove('pop');
     void slot.offsetWidth;
     slot.classList.add('pop');
-    this.picked.innerHTML = `<div class="t">${this.tools[i].name}</div>`;
+    this.picked.innerHTML = `<div class="t">${toolLabel(this.tools[i].name)}</div>`;
     this.picked.classList.add('show');
     clearTimeout(this.pickedTimer);
     this.pickedTimer = window.setTimeout(() => this.picked.classList.remove('show'), 900);
@@ -529,7 +552,7 @@ export class Hud {
   /** Touch controls: say how to switch tools with a finger, and show the touch help in the menu. */
   setTouch(): void {
     const swipe = `<svg class="swipe" viewBox="0 0 24 24"><g class="glide"><path d="M4 12h16"/><path d="M8 8l-4 4 4 4"/><path d="M16 8l4 4-4 4"/></g></svg>`;
-    this.how.innerHTML = `<span>${swipe}Swipe or tap to switch</span>`;
+    this.how.innerHTML = `<span>${swipe}滑动或轻点切换工具</span>`;
   }
 
   /** The angle of tool i round the wheel (radians clockwise from the top). */
@@ -541,7 +564,7 @@ export class Hud {
     this.wheelOn = i;
     this.wheelItems.forEach((item, k) => item.classList.toggle('on', k === i));
     const t = this.tools[i];
-    this.wheelCentre.innerHTML = `<div class="t">${t.name}</div>${t.hint}`;
+    this.wheelCentre.innerHTML = `<div class="t">${toolLabel(t.name)}</div>${t.hint}`;
   }
 
   get wheelOpen(): boolean {

@@ -8,10 +8,11 @@
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "erasableSyntaxOnly": true,
     "noEmit": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vite/client", "node", "@webgpu/types"]
   },
-  "include": ["src", "tests", "tests-gpu", "scripts", "vite.config.ts"]
+  "include": ["src", "api", "server", "tests", "tests-gpu", "scripts", "vite.config.ts"]
 }

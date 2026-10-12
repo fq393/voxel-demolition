@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+  "outputDirectory": "dist",
+  "regions": ["sin1"],
+  "functions": {"api/leaderboard.ts": {"maxDuration": 15}},
+  "headers": [{"source": "/api/(.*)", "headers": [{"key":"Cache-Control","value":"no-store"}]}]
+}

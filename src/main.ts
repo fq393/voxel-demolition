@@ -29,6 +29,8 @@ import { SuitJets } from './jets.ts';
 import { SkidMarks } from './skids.ts';
 import type { Satellites } from './satellites.ts';
 import { Loader } from './loader.ts';
+import { DemolitionMission } from './mission.ts';
+import { PlayerBoard } from './player-board.ts';
 
 /** What a tool does where it hits: blast radius (m), share of it turned to dust, push (m/s), reach (m), seconds between uses, held fires again. */
 interface ToolSpec extends Tool {
@@ -47,11 +49,11 @@ interface ToolSpec extends Tool {
 }
 
 const TOOLS: ToolSpec[] = [
-  { name: 'Hammer', icon: `<svg viewBox="0 0 24 24"><path d="M4 20l9-9"/><path d="M11 5l3-2 7 7-2 3z"/><path d="M12 8l4 4"/></svg>`, hint: 'Knock a fist-sized hole, up close', radius: 0.4, core: 0.6, push: 3, reach: 3.5, cooldown: 0.32, auto: true },
-  { name: 'Laser', icon: `<svg viewBox="0 0 24 24"><path d="M3 14h7"/><rect x="10" y="11" width="8" height="6" rx="1"/><path d="M18 14h3"/><path d="M4 10l2 1M4 18l2-1"/></svg>`, hint: 'Hold to cut through anything: cut a tower through and it topples', radius: 0.34, core: 1, push: 0, reach: 250, cooldown: 0.05, auto: true, laser: true },
-  { name: 'Rocket', icon: `<svg viewBox="0 0 24 24"><path d="M5 19l3-3"/><path d="M9 15l-3-3 7-7c2-2 5-2 6-2 0 1 0 4-2 6z"/><path d="M14 10l-4 4"/><path d="M7 12l-3 1 2-4 3 0"/><path d="M12 17l-1 3 4-2 0-3"/></svg>`, hint: 'Blow a hole through a wall', radius: 1.7, core: 0.45, push: 12, explosive: true, reach: 600, cooldown: 0.7, auto: false },
-  { name: 'Charge', icon: `<svg viewBox="0 0 24 24"><rect x="4" y="9" width="12" height="11" rx="1.5"/><path d="M8 9V6h4v3"/><path d="M12 6c0-2 2-3 4-3"/><path d="M18 2l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/></svg>`, hint: 'Demolition charge: takes out most of a storey', radius: 3.2, core: 0.4, push: 14, explosive: true, reach: 600, cooldown: 1.2, auto: false },
-  { name: 'Wrecking ball', icon: `<svg viewBox="0 0 24 24"><circle cx="12" cy="14" r="7"/><path d="M12 7V2"/><circle cx="12" cy="2.5" r="0"/></svg>`, hint: 'Throw a 2 t ball', radius: 0, core: 0, push: 0, reach: 0, cooldown: 0.5, auto: false, ball: [0.55, 3, 32] },
+  { name: 'Hammer', icon: `<svg viewBox="0 0 24 24"><path d="M4 20l9-9"/><path d="M11 5l3-2 7 7-2 3z"/><path d="M12 8l4 4"/></svg>`, hint: '靠近墙面，挥锤破开一个小洞', radius: 0.4, core: 0.6, push: 3, reach: 3.5, cooldown: 0.32, auto: true },
+  { name: 'Laser', icon: `<svg viewBox="0 0 24 24"><path d="M3 14h7"/><rect x="10" y="11" width="8" height="6" rx="1"/><path d="M18 14h3"/><path d="M4 10l2 1M4 18l2-1"/></svg>`, hint: '按住切割承重结构，让楼层失去支撑', radius: 0.34, core: 1, push: 0, reach: 250, cooldown: 0.05, auto: true, laser: true },
+  { name: 'Rocket', icon: `<svg viewBox="0 0 24 24"><path d="M5 19l3-3"/><path d="M9 15l-3-3 7-7c2-2 5-2 6-2 0 1 0 4-2 6z"/><path d="M14 10l-4 4"/><path d="M7 12l-3 1 2-4 3 0"/><path d="M12 17l-1 3 4-2 0-3"/></svg>`, hint: '瞄准墙体开火，炸开一处缺口', radius: 1.7, core: 0.45, push: 12, explosive: true, reach: 600, cooldown: 0.7, auto: false },
+  { name: 'Charge', icon: `<svg viewBox="0 0 24 24"><rect x="4" y="9" width="12" height="11" rx="1.5"/><path d="M8 9V6h4v3"/><path d="M12 6c0-2 2-3 4-3"/><path d="M18 2l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/></svg>`, hint: '爆破炸药：一次拆掉大片楼层', radius: 3.2, core: 0.4, push: 14, explosive: true, reach: 600, cooldown: 1.2, auto: false },
+  { name: 'Wrecking ball', icon: `<svg viewBox="0 0 24 24"><circle cx="12" cy="14" r="7"/><path d="M12 7V2"/><circle cx="12" cy="2.5" r="0"/></svg>`, hint: '投掷两吨破拆球', radius: 0, core: 0, push: 0, reach: 0, cooldown: 0.5, auto: false, ball: [0.55, 3, 32] },
 ];
 
 /** Hooks for the sky and the smoke and dust (sky.ts, particles.ts), when present. */
@@ -115,8 +117,24 @@ const view = new CityRenderer(canvas);
 const hand = new ViewModel();
 view.camera.add(hand.object);
 view.scene.add(view.camera);
-const testing = new URLSearchParams(location.search).has('test');
+const testing = import.meta.env.DEV && new URLSearchParams(location.search).has('test');
+if (testing) {
+  const errors = { console: [] as string[], page: [] as string[] };
+  Object.assign(window, { qaErrors: errors });
+  const reportError = console.error.bind(console);
+  console.error = (...items: unknown[]) => { errors.console.push(items.map(String).join(' ')); reportError(...items); };
+  addEventListener('error', (event) => errors.page.push(event.message));
+  addEventListener('unhandledrejection', (event) => errors.page.push(String(event.reason)));
+}
 let playing = testing;
+let ready = false;
+let rebuilding = false;
+let freeLook = false;
+let dragLook = false;
+let screenshotPaused = false;
+let pendingRankedStart = false;
+let rankedPrepared = false;
+let playSequence = 0;
 const hud = new Hud(
   TOOLS,
   settings,
@@ -128,10 +146,30 @@ const hud = new Hud(
   },
 );
 hud.showMenu(!testing);
-hud.onReset = () => void rebuild().then(() => hud.toast('Reset'));
+hud.onReset = () => void rebuild().then(() => hud.toast('已重建'));
+const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
+playerBoard.mountMenu(hud.menu);
+const mission = SCENE === 'city' ? new DemolitionMission({
+  onRetry: async () => { pausePlay(); await rebuild(); },
+  onSandbox: () => play(),
+  onFinish: () => {
+    pausePlay(false);
+    void playerBoard.finishRun(mission?.snapshot.count ?? 0);
+  },
+  onModeChange: (mode) => {
+    playSequence++;
+    pendingRankedStart = rankedPrepared = false;
+    playerBoard.resetRound();
+    hud.setLoading(null);
+    playerBoard.updateScore(0, mode === 'challenge');
+    if (mode === 'challenge' && ready && city.state.some((s) => s !== 0)) void rebuild();
+  },
+}) : null;
+mission?.mountMenu(hud.menu);
+if (!testing) mission?.setMode('challenge');
 /** The thumb sticks and buttons, on touch devices (created with the input below). */
 let touch: TouchControls | null = null;
-hud.setLoading('Building the city…');
+hud.setLoading('正在建造街区…');
 
 function applySettings(): void {
   try {
@@ -160,16 +198,65 @@ function applySettings(): void {
 
 /** Capture the mouse (called straight from a click: browsers only allow it then); on touch, just play. */
 function play(): void {
+  if (!ready || rebuilding || mission?.snapshot.phase === 'won' || mission?.snapshot.phase === 'lost') return;
+  if (!playerBoard.ensureProfile(() => play())) return;
+  if (mission?.snapshot.mode === 'challenge' && mission.snapshot.phase === 'ready' && !rankedPrepared) {
+    if (pendingRankedStart) return;
+    const sequence = ++playSequence;
+    pendingRankedStart = true;
+    hud.setLoading('正在连接排行榜…');
+    void playerBoard.beginRun().then(() => {
+      if (sequence !== playSequence) return;
+      pendingRankedStart = false;
+      rankedPrepared = true;
+      hud.setLoading(null);
+      play();
+    }).catch((error: unknown) => {
+      if (sequence !== playSequence) return;
+      pendingRankedStart = false;
+      hud.setLoading(null);
+      hud.toast(error instanceof Error ? error.message : '排行榜连接失败，请重试或选择自由拆除');
+    });
+    return;
+  }
   sounds.resume();
+  lastRead = performance.now() / 1000;
   if (touch) {
     touchPlaying = true;
     playing = true;
     hud.showMenu(false);
     touch.visible = true;
+    mission?.start();
     return;
   }
   const lock = canvas.requestPointerLock() as Promise<void> | undefined;
-  lock?.catch(() => hud.toast('The browser would not capture the mouse: click the view to try again'));
+  const sequence = playSequence;
+  lock?.catch(() => {
+    if (sequence !== playSequence) return;
+    // Embedded Chromium can decline pointer lock. Drag look uses the same input path.
+    freeLook = true;
+    playing = true;
+    hud.showMenu(false);
+    mission?.start();
+    hud.toast('按住右键拖动视角 · 左键发射 · Esc 暂停');
+  });
+}
+function pausePlay(showMenu = true): void {
+  playSequence++;
+  if (pendingRankedStart) {
+    pendingRankedStart = rankedPrepared = false;
+    playerBoard.resetRound();
+    hud.setLoading(null);
+  }
+  freeLook = touchPlaying = dragLook = held = aiming = wantFire = false;
+  playing = false;
+  keys.clear();
+  look.x = look.y = look.sx = look.sy = 0;
+  hud.closeWheel();
+  if (touch) touch.visible = false;
+  if (document.pointerLockElement) document.exitPointerLock();
+  hud.showMenu(showMenu);
+  mission?.update(0, false, city.state);
 }
 /** The mouse is captured: only then does it turn the view (a free cursor would wander off). */
 let captured = false;
@@ -177,8 +264,10 @@ let captured = false;
 let touchPlaying = false;
 document.addEventListener('pointerlockchange', () => {
   captured = document.pointerLockElement === canvas;
-  playing = captured || testing || touchPlaying;
-  hud.showMenu(!playing);
+  const finished = mission?.snapshot.phase === 'won' || mission?.snapshot.phase === 'lost';
+  playing = !finished && (captured || testing || touchPlaying || freeLook);
+  hud.showMenu(!playing && !finished);
+  if (playing) mission?.start();
   canvas.style.cursor = captured ? 'none' : '';
   held = false;
   aiming = false;
@@ -187,7 +276,7 @@ document.addEventListener('pointerlockchange', () => {
 });
 // A click on the view while the mouse is free captures it (and doesn't fire)
 canvas.addEventListener('mousedown', (e) => {
-  if (!captured) {
+  if (!captured && !freeLook && !testing) {
     e.stopPropagation();
     play();
   }
@@ -204,6 +293,7 @@ let wantFire = false;
 const GAME_KEYS = new Set(['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'AltLeft', 'AltRight', 'Slash']);
 addEventListener('keydown', (e) => {
   if (!playing) return;
+  if (e.code === 'Escape') { pausePlay(); return; }
   if (GAME_KEYS.has(e.code)) e.preventDefault();
   if (e.repeat) return;
   keys.add(e.code);
@@ -215,7 +305,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') void rebuild();
   if (e.code === 'KeyX') {
     timeScale = timeScale === 1 ? SLOW : 1;
-    hud.toast(timeScale === 1 ? 'Normal speed' : 'Slow motion');
+    hud.toast(timeScale === 1 ? '正常速度' : '慢动作');
   }
   if (e.code === 'KeyT') {
     const next = SKIES.find((s) => s.hour > settings.hour + 0.01) ?? SKIES[0];
@@ -233,6 +323,7 @@ addEventListener('keyup', (e) => {
 });
 addEventListener('blur', () => {
   keys.clear();
+  held = aiming = dragLook = wantFire = false;
   hud.closeWheel();
 });
 addEventListener('mousemove', (e) => {
@@ -242,7 +333,7 @@ addEventListener('mousemove', (e) => {
     hud.aimWheel(e.movementX, e.movementY);
     return;
   }
-  if (!captured) return;
+  if (!captured && !(freeLook && dragLook)) return;
   look.x += e.movementX;
   look.y += e.movementY;
   hand.look(e.movementX, e.movementY);
@@ -252,7 +343,7 @@ const look = { x: 0, y: 0, sx: 0, sy: 0 };
 /** F: into the car or out of it (at the track, near it), else flying or walking. */
 function pressF(): void {
   if (SCENE === 'space') {
-    hud.toast('No walking in orbit');
+    hud.toast('轨道场景只能漂浮');
     return;
   }
   if (car && (driving || player.position.distanceTo(car.position) < GET_IN)) setDriving(!driving);
@@ -284,12 +375,12 @@ function setDriving(on: boolean): void {
   car.wantGuns = false;
   rocketDue = false;
   byCar = true;
-  hud.toast('On foot · F by the car to get back in');
+  hud.toast('已下车 · 靠近赛车按 F 上车');
 }
 function toggleFly(): void {
   player.flying = !player.flying;
   player.velocity.set(0, 0, 0);
-  hud.toast(player.flying ? (touch ? 'Flying' : 'Flying · Shift fast · Alt slow') : 'Walking');
+  hud.toast(player.flying ? (touch ? '飞行' : '飞行 · Shift 加速 · Alt 慢速') : '步行');
   touch?.setFlying(player.flying);
 }
 function turn(dt: number): void {
@@ -329,16 +420,19 @@ addEventListener('mousedown', (e) => {
     if (e.button === 0 && chosen >= 0) selectTool(chosen, true);
     return;
   }
-  if (!captured) return;
+  if (!playing || (!captured && !testing && !(freeLook && e.target === canvas))) return;
   if (e.button === 0) {
     held = true;
     wantFire = true;
   }
-  if (e.button === 2) aiming = true;
+  if (e.button === 2) {
+    if (freeLook) { dragLook = true; if (driving) aiming = true; }
+    else aiming = true;
+  }
 });
 addEventListener('mouseup', (e) => {
   if (e.button === 0) held = false;
-  if (e.button === 2) aiming = false;
+  if (e.button === 2) aiming = dragLook = false;
 });
 addEventListener('contextmenu', (e) => e.preventDefault());
 addEventListener(
@@ -463,14 +557,7 @@ touch = touchDevice
       },
       aim: (on) => (aiming = on),
       toggleFly: () => pressF(),
-      pause: () => {
-        touchPlaying = false;
-        playing = captured || testing;
-        held = false;
-        aiming = false;
-        touch!.visible = false;
-        hud.showMenu(true);
-      },
+      pause: () => pausePlay(),
     })
   : null;
 if (touch) {
@@ -525,12 +612,12 @@ function spawn(): void {
 
 /** The stages of starting up, as the loading bar shows them (weights: their share of the bar). */
 const loader = new Loader([
-  { name: 'Starting the GPU and loading materials', weight: 4 },
-  { name: SCENE === 'track' ? 'Building the track' : SCENE === 'space' ? 'Building the station' : 'Building the building', weight: 2 },
-  { name: 'Starting the physics', weight: 2 },
-  { name: 'Lighting the sky', weight: 1 },
-  { name: 'Compiling shaders', weight: 3 },
-  { name: 'Tuning for this device', weight: 3 },
+  { name: '启动显卡并加载材质', weight: 4 },
+  { name: SCENE === 'track' ? '搭建赛道' : SCENE === 'space' ? '搭建空间站' : '搭建城市建筑', weight: 2 },
+  { name: '启动破坏物理', weight: 2 },
+  { name: '布置天空与光照', weight: 1 },
+  { name: '编译渲染程序', weight: 3 },
+  { name: '测量并适配显卡性能', weight: 3 },
 ]);
 
 async function start(): Promise<void> {
@@ -611,7 +698,7 @@ async function start(): Promise<void> {
   await loader.stage(5);
   const key = deviceKey(view.adapterInfo, SCENE);
   profile = new URLSearchParams(location.search).has('retune') ? null : savedProfile(key);
-  if (profile) loader.detail('Tuned for this device already');
+  if (profile) loader.detail('使用本机已测得的画质设置');
   else {
     profile = await tune(device, key);
     saveProfile(profile);
@@ -619,8 +706,12 @@ async function start(): Promise<void> {
   applyProfile(profile);
 
   await loader.finish();
+  ready = true;
+  mission?.reset(city.state);
+  if (playing) mission?.start();
   hud.setLoading(null);
   if (playing) hud.showMenu(false);
+  if (!testing) playerBoard.ensureProfile(() => play());
   // The tuning ran the game on a clock of its own: the real one starts now
   last = performance.now();
   accumulator = 0;
@@ -633,9 +724,9 @@ async function start(): Promise<void> {
  * until one fits.
  */
 async function tune(device: GPUDevice, key: string): Promise<DeviceProfile> {
-  loader.detail('Timing the physics…');
+  loader.detail('测量物理计算速度…');
   const physicsTime = await measurePhysics(device, (share) => loader.progress(share * 0.35));
-  loader.detail('Timing the drawing…');
+  loader.detail('测量渲染速度…');
   // A charge's smoke and a collapse's dust in front of the building, seen from the street
   spawn();
   // (In front of the spawn point, wherever the scene puts it)
@@ -673,7 +764,7 @@ function applyProfile(p: DeviceProfile): void {
   physics.solver.params.iterations = p.iterations;
   if (smoke) smoke.budget = p.particles;
   applySettings();
-  hud.setTuned(`This device: ${p.quality} quality${p.resolution < 1 ? ` at ${Math.round(p.resolution * 100)}% resolution` : ''}, up to ${p.looseCap.toLocaleString()} loose voxels`);
+  hud.setTuned(`本机画质：${({low:'低',medium:'中',high:'高'})[p.quality]}${p.resolution < 1 ? ` · ${Math.round(p.resolution * 100)}% 分辨率` : ''} · 最多 ${p.looseCap.toLocaleString()} 个活动碎块`);
 }
 
 /**
@@ -682,6 +773,16 @@ function applyProfile(p: DeviceProfile): void {
  * car) back where they began.
  */
 async function rebuild(): Promise<void> {
+  if (!ready || rebuilding) return;
+  rebuilding = true;
+  playSequence++;
+  pendingRankedStart = rankedPrepared = false;
+  playerBoard.resetRound();
+  held = wantFire = aiming = dragLook = false;
+  keys.clear();
+  hud.setLoading('正在重建街区…');
+  // Finish the old GPU readback before replacing the world it refers to.
+  while (reading) await new Promise<void>((r) => setTimeout(r, 10));
   alarms.clear();
   for (const r of rockets.splice(0)) view.scene.remove(r.mesh);
   pending.length = charges.length = blows.length = crushes.length = 0;
@@ -710,6 +811,14 @@ async function rebuild(): Promise<void> {
     placeCar();
     setDriving(true);
   }
+  cooldown = 0;
+  accumulator = 0;
+  timeScale = 1;
+  mission?.reset(city.state);
+  pausePlay();
+  if (mission) playerBoard.updateScore(0, mission.snapshot.mode === 'challenge');
+  hud.setLoading(null);
+  rebuilding = false;
 }
 
 /** The car back on the grid, at rest, with its body in the (new) solver. */
@@ -868,7 +977,7 @@ function wreckCar(): void {
   }
   detonate(at, TOOLS[3], player.position.distanceTo(at));
   placeCar();
-  hud.toast('Wrecked · a new car waits on the grid');
+  hud.toast('赛车报废 · 起点已有新车');
 }
 
 /** A damaged engine smokes, darker the worse it is, and past half its health gone it's on fire. */
@@ -1754,8 +1863,10 @@ async function readDebris(): Promise<void> {
   reading = true;
   try {
     const counters = await physics.solver.readCounters();
+    if (rebuilding || screenshotPaused || (ready && (!playing || document.hidden))) return;
     physics.solver.adapt(counters);
     const { voxels, data, sections, sectionData } = await physics.readLoose();
+    if (rebuilding || screenshotPaused || (ready && (!playing || document.hidden))) return;
     const out: number[] = [];
     const { x, y } = player.position;
     const now = performance.now() / 1000;
@@ -1957,9 +2068,14 @@ function frame(now: number): void {
 /** One frame of the game at time `now` (ms): input, physics, effects, the render. */
 function tick(now: number): void {
   const began = performance.now();
+  if (screenshotPaused || rebuilding || (ready && (!playing || document.hidden))) {
+    last = now;
+    view.render();
+    return;
+  }
   // (Never negative: a clock that jumps back, a frame from a timer and one from the display
   // out of order, would stall the physics until it caught up)
-  const dt = Math.max(0, Math.min((now - last) / 1000, 0.1));
+  const dt = screenshotPaused || rebuilding ? 0 : Math.max(0, Math.min((now - last) / 1000, 0.1));
   last = now;
   fps += (1 / Math.max(dt, 1e-3) - fps) * 0.05;
   if (playing) {
@@ -2030,7 +2146,7 @@ function tick(now: number): void {
   }
   if (steps === 2) accumulator = 0;
   if (steps) stepMs += ((performance.now() - t0) / steps - stepMs) * 0.1;
-  if (++frames % 6 === 0) void readDebris();
+  if (++frames % 6 === 0 && !rebuilding && !screenshotPaused) void readDebris();
 
   // Camera: the player's eye (or behind the car), shaken by blasts
   if (car) {
@@ -2095,7 +2211,7 @@ function tick(now: number): void {
   }
   // Walking up to the car: say how to get in
   const near = !!car && !driving && player.position.distanceTo(car.position) < GET_IN;
-  if (near && !byCar) hud.toast(touch ? 'Tap the fly button to get in' : 'F to get in');
+  if (near && !byCar) hud.toast(touch ? '点击飞行按钮上车' : '按 F 上车');
   byCar = near;
   if (car) {
     engine ??= sounds.engine();
@@ -2117,15 +2233,17 @@ function tick(now: number): void {
   view.heatClock.value = simTime;
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
   view.render();
+  mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
+  if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
   timeWork((view.renderer.backend as unknown as { device: GPUDevice }).device, began);
-  if (frames % 15 === 0) {
-    hud.stats(`${fps.toFixed(0)} fps\n${city.count.toLocaleString()} voxels · ${physics.loose.toLocaleString()} loose\n${[player.flying ? 'flying' : '', timeScale < 1 ? 'slow motion' : ''].filter(Boolean).join(' · ')}`);
+  if (frames % 15 === 0 && testing) {
+    hud.stats(`${fps.toFixed(0)} fps\n${city.count.toLocaleString()} 体素 · ${physics.loose.toLocaleString()} 活动碎块\n${[player.flying ? '飞行' : '', timeScale < 1 ? '慢动作' : ''].filter(Boolean).join(' · ')}`);
   }
 }
 
 // ?test plays without capturing the mouse (automation, recording: scripts drive the view
 // through the handle); the mouse only turns the view once captured
-Object.assign(window, {
+if (testing) Object.assign(window, {
   city: {
     player,
     view,
@@ -2184,6 +2302,36 @@ Object.assign(window, {
     rebuild,
     sounds,
     hand,
+    get mission() { return mission; },
+    get playing() { return playing; },
+    get ready() { return ready; },
+    get freeLook() { return freeLook; },
+    playerBoard,
+  },
+  __THREE_GAME_TEST_HOOKS__: {
+    async setState(state: string) {
+      if (state !== 'active-play') throw new Error(`Unknown capture state: ${state}`);
+      while (!ready || document.querySelector('#loader')) await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      playing = true;
+      hud.showMenu(false);
+      touchPlaying = !!touch;
+      if (touch) touch.visible = true;
+      mission?.start();
+      return { state };
+    },
+    setPausedForScreenshot(paused: boolean) { screenshotPaused = paused; },
+  },
+});
+if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
+  get: () => {
+    const info = view.renderer.info;
+    return {
+      fps: Number(fps.toFixed(1)),
+      gpu: view.adapterInfo,
+      renderer: { calls: info.render.drawCalls, triangles: info.render.triangles, geometries: info.memory.geometries, textures: info.memory.textures, memoryBytes: info.memory.total },
+      physics: { engine: 'three-avbd WebGPU', timestep: 1 / 60, voxels: city.count, loose: physics?.loose ?? 0 },
+      state: mission?.snapshot ?? { mode: 'sandbox' },
+    };
   },
 });
 

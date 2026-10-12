@@ -26,7 +26,7 @@ export class Loader {
     (this.root.querySelector('.sub') as HTMLElement).textContent = scene === 'track'
       ? '正在搭建一条可以撞穿的赛道'
       : scene === 'space' ? '正在组装一座可以拆开的空间站' : '正在搭建一座可以拆掉的城市';
-    document.title = `${title} · 本地试玩`;
+    document.title = `${title} · 解压小游戏`;
     this.stages = stages;
     this.total = stages.reduce((a, s) => a + s.weight, 0);
     const list = this.root.querySelector('.steps') as HTMLElement;

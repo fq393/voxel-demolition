@@ -13,6 +13,8 @@
 
 import { buildDistrict } from './district-buildings.ts';
 import type { DistrictBuilding } from './district-layout.ts';
+import { buildUrbanProps } from './urban-props.ts';
+import type { UrbanProp } from './urban-prop-types.ts';
 
 /** Voxel edge (m). */
 export const VOXEL = 0.25;
@@ -47,6 +49,7 @@ export interface City {
   count: number;
   /** Enterable buildings and furniture share the city's voxel collision world. */
   district?: DistrictBuilding[];
+  urbanProps?: UrbanProp[];
   /** Per voxel: centre (xyz, m), material, object, and its cell in that object. */
   position: Float32Array;
   material: Uint8Array;
@@ -513,8 +516,10 @@ export function buildCity(seed = 7, includeDistrict = true): City {
   sign(w, -16.8, -14.2);
 
   const district = includeDistrict ? buildDistrict(w) : [];
+  const urbanProps = includeDistrict ? buildUrbanProps(w) : [];
   const city = w.finish({ pitch: BLOCK + STREET, street: STREET, blocks: 1 });
   city.district = district;
+  city.urbanProps = urbanProps;
   return city;
 }
 

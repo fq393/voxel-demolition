@@ -14,6 +14,9 @@ import { Chips } from './chips.ts';
 import { Impacts } from './impacts.ts';
 import { skyline } from './skyline.ts';
 import { StreetDetails } from './street-details.ts';
+import { CityGuide } from './city-guide.ts';
+import { CITY_CAR_SPAWNS, findVehicleExit, playerOverlapsCar, safeExitSpeed } from './city-driving.ts';
+import { collectSkylineColliders, firstStaticHit, overlapsPlayer, overlapsVehicle, type StaticBox } from './city-colliders.ts';
 import { Particles } from './particles.ts';
 import { CitySky } from './sky.ts';
 import { SpaceSky } from './space.ts';
@@ -84,6 +87,7 @@ let line: TrackLine | null = null;
 let car: Car | null = null;
 let driving = false;
 let carSlot = -1;
+let carTeleported = false;
 let boostLeft = 1;
 /** Its engine's sound (once the audio's started). */
 let engine: ReturnType<Sounds['engine']> = null;
@@ -150,6 +154,7 @@ hud.showMenu(!testing);
 hud.onReset = () => void rebuild().then(() => hud.toast('已重建'));
 const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
+const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
 const mission = SCENE === 'city' ? new DemolitionMission({
   onRetry: async () => { pausePlay(); await rebuild(); },
   onSandbox: () => play(),
@@ -340,7 +345,7 @@ addEventListener('mousemove', (e) => {
 });
 /** Mouse movement since the last frame (pixels), turned into a turn of the view once a frame. */
 const look = { x: 0, y: 0, sx: 0, sy: 0 };
-/** F: into the car or out of it (at the track, near it), else flying or walking. */
+/** F: into or out of the nearby car, else flying or walking. */
 function pressF(): void {
   if (SCENE === 'space') {
     hud.toast('轨道场景只能漂浮');
@@ -350,12 +355,20 @@ function pressF(): void {
   else toggleFly();
 }
 /** How near the car (m) F gets in. */
-const GET_IN = 8;
+const GET_IN = SCENE === 'city' ? 5.5 : 8;
 /** Near enough to get in, last frame (the prompt shows as the player comes up to it). */
 let byCar = false;
 /** Into the car (the chase view behind it) or out of it (standing by its door, on foot). */
-function setDriving(on: boolean): void {
+function setDriving(on: boolean, forceExit = false): void {
   if (!car) return;
+  let exit: [number, number, number] | null = null;
+  if (!on && SCENE === 'city') {
+    if (!forceExit && !safeExitSpeed(car.velocity.x, car.velocity.y)) { hud.toast('先松开油门、按 Space 刹车，再下车'); return; }
+    exit = findVehicleExit(car.position.x, car.position.y, car.heading, (x, y, z) => player.blocked(x, y, z, 1.8));
+    if (!exit && !forceExit) { hud.toast('车门旁没有空位，挪开一点再下车'); return; }
+  }
+  held = aiming = wantFire = rocketDue = false;
+  keys.clear();
   driving = on;
   hud.setDriving(on);
   hand.object.visible = !on;
@@ -367,15 +380,17 @@ function setDriving(on: boolean): void {
     return;
   }
   const f = car.forward;
-  player.position.set(car.position.x - f.y * 2.3, car.position.y + f.x * 2.3, 0);
+  if (SCENE === 'city') player.position.set(...(exit ?? [-27, -12, 0]));
+  else player.position.set(car.position.x - f.y * 2.3, car.position.y + f.x * 2.3, 0);
   player.velocity.set(0, 0, 0);
   player.flying = false;
+  touch?.setFlying(false);
   player.yaw = car.heading;
   player.pitch = 0;
   car.wantGuns = false;
   rocketDue = false;
   byCar = true;
-  hud.toast('已下车 · 靠近赛车按 F 上车');
+  hud.toast('已下车 · 靠近车按 F 上车，左键继续拆楼');
 }
 function toggleFly(): void {
   player.flying = !player.flying;
@@ -569,9 +584,11 @@ if (touch) {
 // The world
 // Built while the page loads (start): empty until then
 let city = emptyCity();
+let cityStatic: StaticBox[] = [];
 let streetDetails: StreetDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
+player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading));
 touch?.setFlying(player.flying);
 if (touch) {
   player.flySpeed = TOUCH_FLY_SPEED;
@@ -585,6 +602,14 @@ const dustTint: Record<number, THREE.Color> = {
   [Mat.LitGlass]: new THREE.Color(0.7, 0.72, 0.72),
 };
 const concreteDust = new THREE.Color(0.62, 0.6, 0.56);
+
+/** Static perimeter buildings stop rays; the centre remains the destructible voxel world. */
+function castWorld(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): ReturnType<typeof raycast> {
+  const staticHit = firstStaticHit(cityStatic, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
+  const hit = raycast(city, origin, direction, staticHit ?? reach);
+  if (hit) return hit;
+  return staticHit === null ? null : { t: staticHit, voxel: -1, normal: [-direction[0], -direction[1], -direction[2]] };
+}
 
 /** Start on the pavement off the tower's rounded corner, looking up at it: the shopfront and the blade sign in view, the tower rising overhead. */
 function spawn(): void {
@@ -607,6 +632,8 @@ function spawn(): void {
     return;
   }
   player.position.set(-27, -12, 0);
+  player.flying = false;
+  touch?.setFlying(false);
   player.yaw = 0.3;
   player.pitch = 0.38;
 }
@@ -647,7 +674,10 @@ async function start(): Promise<void> {
   } else if (SCENE === 'space') view.setSpace();
   else {
     view.setStreets(city);
-    view.scene.add(skyline(city));
+    const surrounding = skyline(city) as THREE.InstancedMesh;
+    view.scene.add(surrounding);
+    cityStatic = collectSkylineColliders(surrounding);
+    cityGuide?.setLandmarks(cityStatic);
     streetDetails = new StreetDetails(city);
     view.scene.add(streetDetails.object);
   }
@@ -665,13 +695,13 @@ async function start(): Promise<void> {
     }
   }
   spawn();
-  if (SCENE === 'track' && line) {
+  if (SCENE === 'city' || (SCENE === 'track' && line)) {
     car = new Car();
     flames = new Flames(car.exhausts().at.length);
     skids = new SkidMarks(2);
     view.scene.add(car.object, car.bits.object, flames.object, skids.object);
     placeCar();
-    setDriving(true);
+    if (SCENE === 'track') setDriving(true);
   }
 
   await loader.stage(3);
@@ -795,6 +825,7 @@ async function rebuild(): Promise<void> {
   skids?.clear();
   dustiness = 0;
   physics.destroy();
+  carSlot = -1;
   city = buildWorld();
   structure = new Structure(city);
   (player as unknown as { city: typeof city }).city = city;
@@ -813,7 +844,7 @@ async function rebuild(): Promise<void> {
   spawn();
   if (car) {
     placeCar();
-    setDriving(true);
+    setDriving(SCENE === 'track', true);
   }
   cooldown = 0;
   accumulator = 0;
@@ -826,14 +857,32 @@ async function rebuild(): Promise<void> {
 }
 
 /** The car back on the grid, at rest, with its body in the (new) solver. */
-function placeCar(): void {
-  if (!car || !line) return;
-  const { position, heading } = gridSlot(line);
+function placeCar(): boolean {
+  if (!car) return false;
+  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h).length && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h)) : null;
+  if (SCENE === 'city' && !parking) { hud.toast('停车位被堵住了，按 R 重建街区后再试'); return false; }
+  if (SCENE !== 'city' && !line) return false;
+  const { position, heading } = parking ? { position: [parking[0], parking[1]], heading: parking[2] } : gridSlot(line!);
   car.place(position[0], position[1], heading);
   car.repair();
-  carSlot = physics.vehicle(CAR_SIZE, [position[0], position[1], CLEARANCE + CAR_SIZE[2] / 2]);
+  const at = [position[0], position[1], CLEARANCE + CAR_SIZE[2] / 2];
+  if (carSlot < 0) carSlot = physics.vehicle(CAR_SIZE, at);
+  if (carSlot >= 0) physics.drive(carSlot, at, [0, 0, Math.sin(heading / 2), Math.cos(heading / 2)], [0, 0, 0], [0, 0, 0]);
+  carTeleported = true;
   boostLeft = 1;
   chase.yaw = heading;
+  chase.orbit = chase.lift = chase.idle = 0;
+  return true;
+}
+
+function recallCar(): void {
+  if (!ready || rebuilding || !playing || driving || !car) return;
+  if (placeCar()) hud.toast('车已回到街边停车位 · 跟着小地图找它');
+}
+
+function updateCityGuide(): void {
+  if (!cityGuide || !car) return;
+  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed });
 }
 
 /** The car's controls: keys and the thumb stick (throttle up, steer across), or coasting to a stop with no one in it. */
@@ -865,6 +914,7 @@ function driveStep(dt: number): void {
   const d = driveInput();
   boostLeft = Math.max(0, Math.min(1, boostLeft + (d.boost ? -dt * 0.22 : dt * 0.08)));
   c.begin();
+  carTeleported = false;
   const [x0, y0, h0] = [c.position.x, c.position.y, c.heading];
   const parts = Math.max(1, Math.ceil((c.velocity.length() * dt) / 0.33));
   // Already into something (wedged, or a wall left standing round it)? A move that goes no further in is free:
@@ -872,17 +922,29 @@ function driveStep(dt: number): void {
   let inside = sweep(city, c.position.x, c.position.y, c.heading).length;
   for (let k = 0; k < parts; k++) {
     c.step(dt / parts, d);
+    if (overlapsVehicle(cityStatic, c.position.x, c.position.y, c.heading)) {
+      const speed = c.velocity.length();
+      if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.6, speed / 25)); }
+      hurtCar(Math.max(0, speed - 5) * STOP_DAMAGE, c.position.clone().setZ(0.6));
+      if (!carTeleported) c.undo(0.2);
+      break;
+    }
     const hits = sweep(city, c.position.x, c.position.y, c.heading);
     if (hits.length && hits.length <= inside) {
       inside = hits.length;
       continue;
     }
-    if (hits.length && !crash(hits)) {
-      c.undo(0.2);
-      break;
+    if (hits.length) {
+      const passed = crash(hits);
+      if (carTeleported) break;
+      if (!passed) { c.undo(0.2); break; }
     }
   }
   if (carSlot >= 0) {
+    if (carTeleported) {
+      physics.drive(carSlot, [c.position.x, c.position.y, CLEARANCE + CAR_SIZE[2] / 2], [0, 0, Math.sin(c.heading / 2), Math.cos(c.heading / 2)], [0, 0, 0], [0, 0, 0]);
+      return;
+    }
     const turn = Math.atan2(Math.sin(c.heading - h0), Math.cos(c.heading - h0));
     physics.drive(carSlot, [x0, y0, CLEARANCE + CAR_SIZE[2] / 2], [0, 0, Math.sin(h0 / 2), Math.cos(h0 / 2)], [(c.position.x - x0) / dt, (c.position.y - y0) / dt, 0], [0, 0, turn / dt]);
   }
@@ -976,12 +1038,12 @@ function wreckCar(): void {
   const at = new THREE.Vector3(c.position.x, c.position.y, CLEARANCE + 0.6);
   const f = c.forward;
   if (driving) {
-    setDriving(false);
+    setDriving(false, true);
     player.velocity.set(-f.y * 5, f.x * 5, 7);
   }
   detonate(at, TOOLS[3], player.position.distanceTo(at));
   placeCar();
-  hud.toast('赛车报废 · 起点已有新车');
+  hud.toast(SCENE === 'city' ? '车报废了 · 街边停车位已有新车' : '赛车报废 · 起点已有新车');
 }
 
 /** A damaged engine smokes, darker the worse it is, and past half its health gone it's on fire. */
@@ -1023,7 +1085,7 @@ const aimFrom = new THREE.Vector3();
 const aimDir = new THREE.Vector3(1, 0, 0);
 /** Where the crosshair is on something (and where), for a shot from `from`. */
 function aimed(spec: ToolSpec): { to: THREE.Vector3; hit: boolean } {
-  const hit = raycast(city, aimFrom.toArray(), aimDir.toArray(), spec.reach);
+  const hit = castWorld(aimFrom.toArray(), aimDir.toArray(), spec.reach);
   const to = aimFrom.clone().addScaledVector(aimDir, hit ? hit.t : spec.reach * 0.7);
   if (hit) to.addScaledVector(new THREE.Vector3(...hit.normal), -0.2);
   // (The ground counts: a shot into the road goes off there)
@@ -1155,8 +1217,8 @@ function chaseView(dt: number): void {
   const back = eye.clone().sub(from);
   const reach = back.length();
   back.divideScalar(reach);
-  const blocked = raycast(city, from.toArray(), back.toArray(), reach);
-  if (blocked && blocked.voxel >= 0) eye.copy(from).addScaledVector(back, Math.max(1.5, blocked.t - 0.4));
+  const blocked = castWorld(from.toArray(), back.toArray(), reach);
+  if (blocked) eye.copy(from).addScaledVector(back, Math.max(0.4, blocked.t - 0.4));
   // Looking well ahead (the crosshair near the horizon, where the weapons reach), over the car
   dir.set(p.x + Math.cos(yaw) * 40 - eye.x, p.y + Math.sin(yaw) * 40 - eye.y, 1.5 - eye.z).normalize();
 }
@@ -1520,7 +1582,7 @@ function useTool(): void {
     burn(t);
     return;
   }
-  const hit = raycast(city, eye.toArray(), dir.toArray(), t.reach);
+  const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
   // (In orbit a rocket fired at nothing flies off into space, gone at the end of its reach: it may yet meet a satellite)
   const intoSpace = !hit && t.name === 'Rocket' && city.weightless;
   if (!hit && !intoSpace) return;
@@ -1556,7 +1618,7 @@ function land(): void {
   const t = TOOLS[0];
   player.eye(eye);
   player.look(dir);
-  const hit = raycast(city, eye.toArray(), dir.toArray(), t.reach);
+  const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
   if (!hit || hit.voxel < 0) return;
   const at = eye.clone().addScaledVector(dir, hit.t).addScaledVector(new THREE.Vector3(...hit.normal), -Math.min(0.5, t.radius * 0.3));
   detonate(at, t, hit.t, hit.normal);
@@ -1590,7 +1652,7 @@ function throughObject(i: number, o: THREE.Vector3, d: THREE.Vector3, t0: number
 function burn(t: ToolSpec): void {
   player.eye(eye);
   player.look(dir);
-  const hit = raycast(city, eye.toArray(), dir.toArray(), t.reach);
+  const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
   const from = lastBeam;
   lastBeam = dir.clone();
   if (!hit || hit.voxel < 0) return;
@@ -1602,7 +1664,7 @@ function burn(t: ToolSpec): void {
   const ray = new THREE.Vector3();
   for (let k = 1; k <= n; k++) {
     ray.copy(from ?? dir).lerp(dir, k / n).normalize();
-    const h = k === n ? hit : raycast(city, eye.toArray(), ray.toArray(), t.reach);
+    const h = k === n ? hit : castWorld(eye.toArray(), ray.toArray(), t.reach);
     if (!h || h.voxel < 0) continue;
     // It burns a slot through what it hits, not a dimple: swept across a building, it cuts
     // through the walls, the columns inside and the core behind them, out the far side
@@ -1665,7 +1727,7 @@ function laserFrame(now: number): void {
   }
   player.eye(eye);
   player.look(dir);
-  const hit = raycast(city, eye.toArray(), dir.toArray(), t.reach);
+  const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
   // A satellite before whatever else the beam meets: it cuts through it, and it's wrecked
   const sat = satellites?.hit(eye, dir, hit ? hit.t : t.reach);
   const end = eye.clone().addScaledVector(dir, sat ? sat.distance : hit ? hit.t : t.reach);
@@ -1711,7 +1773,7 @@ function planBall(from: THREE.Vector3, v: THREE.Vector3, r: number): void {
   for (let t = 0; t < 4 && vel.length() > 10; t += dt) {
     if (!city.weightless) vel.z -= 9.81 * dt;
     const step = vel.clone().multiplyScalar(dt);
-    const hit = raycast(city, p.toArray(), step.clone().normalize().toArray(), step.length() + r);
+    const hit = castWorld(p.toArray(), step.clone().normalize().toArray(), step.length() + r);
     p.add(step);
     if (!hit || hit.voxel < 0) continue;
     pending.push({ time: now + t - 0.03, at: p.clone().addScaledVector(vel.clone().normalize(), r), radius: r * 1.7, push: vel.length() * 0.35 });
@@ -1901,7 +1963,7 @@ async function readDebris(): Promise<void> {
       // Debris flying into what still stands breaks it (by its speed squared), so collapses cascade
       if (speed > CRUSH_SPEED && crushes.length < 24) {
         const d = [data[o + 4] / speed, data[o + 5] / speed, data[o + 6] / speed];
-        const hit = raycast(city, [px, py, pz], d, speed * 0.12 + 0.6);
+        const hit = castWorld([px, py, pz], d, speed * 0.12 + 0.6);
         if (hit && hit.voxel >= 0) {
           const chunk = structure.chunk[hit.voxel];
           const total = (damage.get(chunk) ?? 0) + speed * speed;
@@ -2071,6 +2133,7 @@ function frame(now: number): void {
 }
 /** One frame of the game at time `now` (ms): input, physics, effects, the render. */
 function tick(now: number): void {
+  updateCityGuide();
   const began = performance.now();
   if (screenshotPaused || rebuilding || (ready && (!playing || document.hidden))) {
     last = now;
@@ -2187,7 +2250,7 @@ function tick(now: number): void {
   // Depth of field: focus eased to what's under the crosshair; sharp over a wide range, and
   // shallow with bokeh while aiming down the sights
   if (frames % 3 === 0) {
-    const f = raycast(city, eye.toArray(), dir.toArray(), 600);
+    const f = castWorld(eye.toArray(), dir.toArray(), 600);
     focusWant = f ? Math.max(1.5, f.t) : 600;
   }
   focusAt += (focusWant - focusAt) * Math.min(1, dt * 5);
@@ -2205,7 +2268,7 @@ function tick(now: number): void {
   const pace = Math.hypot(player.velocity.x, player.velocity.y);
   hand.update(dt, player.walk, player.onGround ? Math.min(1, pace / 9) : 0, sprinting);
   view.glow = Math.max(0.35, (view as unknown as { bloomPass: { strength: { value: number } } }).bloomPass.strength.value - dt * 1.5);
-  const aim = raycast(city, eye.toArray(), dir.toArray(), driving ? CAR_ROCKET.reach : TOOLS[tool].reach || 3);
+  const aim = castWorld(eye.toArray(), dir.toArray(), driving ? CAR_ROCKET.reach : TOOLS[tool].reach || 3);
   if (driving && car) hud.speed(car.speed * 3.6, boostLeft, car.gear, loaded.map((t) => Math.max(0, Math.min(1, 1 - (t - simTime) / RELOAD))), car.health);
   if (car) {
     exhaust(sim, driving && playing ? Math.max(0, driveInput().throttle) : 0);
@@ -2215,7 +2278,7 @@ function tick(now: number): void {
   }
   // Walking up to the car: say how to get in
   const near = !!car && !driving && player.position.distanceTo(car.position) < GET_IN;
-  if (near && !byCar) hud.toast(touch ? '点击飞行按钮上车' : '按 F 上车');
+  if (near && !byCar) hud.toast(touch ? '点「上车」开始驾驶' : '按 F 上车');
   byCar = near;
   if (car) {
     engine ??= sounds.engine();
@@ -2310,7 +2373,9 @@ if (testing) Object.assign(window, {
     get mission() { return mission; },
     get playing() { return playing; },
     get ready() { return ready; },
+    get driving() { return driving; },
     get streetDetails() { return streetDetails; },
+    get staticColliders() { return cityStatic; },
     get freeLook() { return freeLook; },
     playerBoard,
   },
@@ -2337,6 +2402,7 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       renderer: { calls: info.render.drawCalls, triangles: info.render.triangles, geometries: info.memory.geometries, textures: info.memory.textures, memoryBytes: info.memory.total },
       physics: { engine: 'three-avbd WebGPU', timestep: 1 / 60, voxels: city.count, loose: physics?.loose ?? 0 },
       streetDetails: streetDetails?.diagnostics ?? null,
+      staticBuildings: cityStatic.length,
       state: mission?.snapshot ?? { mode: 'sandbox' },
     };
   },

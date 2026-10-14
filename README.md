@@ -2,9 +2,13 @@
 
 [在线试玩](https://voxel-demolition-vanche.vercel.app) · [中文操作说明](PLAY.md)
 
-![温暖午后的小街区，可随时拆除和重建](docs/media/demolition-warm.png)
+![开车逛城，再下车拆楼](docs/media/city-driving.png)
 
-在一座可以拆掉的小街区里，用切割、爆破和慢动作释放压力。中文界面，匿名随机/自定义昵称；自由拆除随时重建，90 秒挑战按每个首次拆下的方块计 1 分，结算后上传个人最高分到共享排行榜。
+先开车兜一圈，撞开街边物件，再下车用切割、爆破和慢动作拆楼。中文界面，匿名随机/自定义昵称；自由拆除随时重建，90 秒挑战按每个首次拆下的方块计 1 分，结算后上传个人最高分到共享排行榜。
+
+城市版默认步行，在身边的车辆按 **F** 上车；**WASD** 驾驶、**Space** 手刹、**B** 加速，停车后按 **F** 下车。手机使用摇杆、刹车和地图旁的上下车按钮。小地图显示你、车辆和楼体；离车后可以召回车辆。中央主楼和街边体素物件可拆，外围 89 栋建筑提供实心碰撞，暂时不可破坏。驾驶碰撞同样进入原有拆除积分，排行榜规则不变。
+
+开放城市方向参考了 [gta7](https://github.com/depixeled-chris/gta7)、[Sketchbook](https://github.com/swift502/Sketchbook) 和 [ocean-drive](https://github.com/StarKnightt/ocean-drive) 的功能组织与车辆交互思路；本次复用自己的 Car/Player、WebGPU 和体素物理，没有导入其他项目的代码或模型。源码依据、版本和后续范围见 [开放城市参考](docs/open-city-references.md)。
 
 本项目基于 [sbobyn/three-voxel-destruction](https://github.com/sbobyn/three-voxel-destruction) 的 MIT 开源实现，保留原作者代码、许可证与资产来源。下方保留原项目玩法和技术介绍。画面细化借鉴 [Bruno Simon 的 folio-2025](https://github.com/brunosimon/folio-2025) 的模型轮廓、色板与光照思路；新增道具细节由本项目编写，未直接复制其模型或贴图。
 
@@ -58,12 +62,12 @@ and picks the quality and how many loose pieces the physics carries, so a collap
 | Mouse | look; left click uses the tool, right click aims |
 | WASD | move; Space / E up, Q / C down (flying), Shift fast, Alt slow |
 | Scroll, or hold Tab | switch tools: hammer, laser, rocket, charge, wrecking ball |
-| F | fly or walk (walking: Space jumps, C crouches, Shift sprints) |
+| F | enter/exit the nearby car; otherwise fly or walk (walking: Space jumps, C crouches, Shift sprints) |
 | X | slow motion |
 | T, R | time of day, reset the scene |
 | Esc | menu (sensitivity, field of view, graphics, sound) |
 
-In the car (the race track):
+In the car (city and race track):
 
 | | |
 |---|---|

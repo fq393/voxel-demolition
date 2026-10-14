@@ -393,7 +393,7 @@ export class Hud {
           ? '开车撞穿护栏，或下车用火箭清场。看台、轮胎、围墙，都能拆。'
           : space
             ? '在零重力里拆空间站。切断支架，看太阳翼飘走；轰开舱体，看碎块散进太空。'
-            : '放下手头的事，拆掉眼前这栋楼。切割、爆破、慢动作，按你的节奏来。'
+            : '先开车兜一圈，撞开挡路的物件，再下车拆楼。没有倒计时，按你的节奏来。'
       }</p>
       <div class="buttons"><button class="play">开始拆除</button></div>
       <div class="grid tap">
@@ -408,7 +408,7 @@ export class Hud {
         <b>鼠标</b><span>鼠标转向；无法锁定时，按住右键拖动视角，左键发射</span>
         <b>WASD</b><span>移动 · Space/E 上升 · Q/C 下降 · Shift 加速</span>
         <b>滚轮 / Tab</b><span>切换工具 / 按住打开工具盘</span>
-        <b>F / X</b><span>飞行与步行切换 / 慢动作</span>
+        <b>F / X</b><span>靠近车辆上下车 · 离车切换飞行/步行 / 慢动作</span>
         <b>Esc / R</b><span>暂停 / 重置场景</span>
         ${track ? '<b>驾车</b><span>W/S 油门与刹车 · A/D 转向 · Space 手刹 · B 加速 · 左键火箭 · 右键机枪 · F 上下车</span>' : ''}
       </div>

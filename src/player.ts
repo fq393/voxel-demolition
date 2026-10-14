@@ -66,6 +66,8 @@ export class Player {
   debrisCount = 0;
   /** Speed (m/s) of the last landing, this frame only (0 otherwise). */
   landed = 0;
+  /** Optional moving-world collider (the driven car), alongside voxels and debris. */
+  extraBlocked: ((x: number, y: number, z: number, height: number) => boolean) | null = null;
 
   private readonly city: City;
 
@@ -226,6 +228,7 @@ export class Player {
   /** The player's box at feet (x, y, z) overlaps a fixed voxel or debris. */
   blocked(x: number, y: number, z: number, height: number): boolean {
     if (z < -1e-4) return true;
+    if (this.extraBlocked?.(x, y, z, height)) return true;
     const cell = (m: number) => Math.floor(m / VOXEL);
     const x0 = cell(x - WIDTH);
     const x1 = cell(x + WIDTH - 1e-6);

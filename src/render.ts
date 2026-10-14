@@ -554,7 +554,12 @@ export class CityRenderer {
   /** Balls thrown (bodies `ids`, the spares): drawn as dark steel spheres from the same buffer. */
   attachBalls(ids: number[]): void {
     if (!this.bodies) return;
-    this.balls?.removeFromParent();
+    if (this.balls) {
+      this.balls.removeFromParent();
+      this.balls.geometry.dispose();
+      const materials = Array.isArray(this.balls.material) ? this.balls.material : [this.balls.material];
+      for (const material of materials) material.dispose();
+    }
     const n = this.bodies.count / (BODY_FLOATS / 4);
     const bodies = storage(this.bodies, 'vec4', (n * BODY_FLOATS) / 4).toReadOnly();
     const which = storage(new THREE.StorageInstancedBufferAttribute(Uint32Array.from(ids), 1), 'uint', ids.length).toReadOnly();

@@ -39,6 +39,9 @@ import { CityJobs } from './city-jobs.ts';
 import { vehicleSpec, type VehicleId } from './vehicle-spec.ts';
 import { CityAmbience } from './city-ambience.ts';
 import { CityLife } from './city-life.ts';
+import { captureDamage, clearDamage, damagedVoxels, loadDamage, saveDamage } from './district-save.ts';
+import { DistrictSigns } from './district-signs.ts';
+import { unsupportedInteriorFurniture } from './district-support.ts';
 
 /** What a tool does where it hits: blast radius (m), share of it turned to dust, push (m/s), reach (m), seconds between uses, held fires again. */
 interface ToolSpec extends Tool {
@@ -97,9 +100,10 @@ let boostLeft = 1;
 let engine: ReturnType<Sounds['engine']> = null;
 /** The chase camera: its yaw (following the car's heading), the mouse's look round and up (eased back when let go). */
 const chase = { yaw: 0, orbit: 0, lift: 0, idle: 0 };
+let worldMode: 'sandbox' | 'challenge' = 'sandbox';
 /** Build the scene's world (and, at the track, its line). */
 function buildWorld(): City {
-  if (SCENE === 'city') return buildCity();
+  if (SCENE === 'city') return buildCity(7, worldMode === 'sandbox');
   if (SCENE === 'space') return buildStation();
   const built = buildTrack();
   line = built.line;
@@ -143,6 +147,7 @@ if (testing) {
 let playing = testing;
 let ready = false;
 let rebuilding = false;
+let queuedModeRebuild = false;
 let freeLook = false;
 let dragLook = false;
 let screenshotPaused = false;
@@ -165,6 +170,9 @@ const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
 const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
 let cityJobs: CityJobs | null = null;
+let districtSigns: DistrictSigns | null = null;
+let damageSerialized = '';
+const damageStorage = {getItem:(key:string)=>localStorage.getItem(key),setItem:(key:string,value:string)=>localStorage.setItem(key,value)};
 let saveElapsed = 0;
 const mission = SCENE === 'city' ? new DemolitionMission({
   onRetry: async () => { pausePlay(); await rebuild(); },
@@ -174,13 +182,18 @@ const mission = SCENE === 'city' ? new DemolitionMission({
     void playerBoard.finishRun(mission?.snapshot.count ?? 0);
   },
   onModeChange: (mode) => {
+    if (ready && worldMode === 'sandbox') saveWorldDamage();
+    worldMode = mode;
     cityJobs?.setEligible(mode === 'sandbox');
     playSequence++;
     pendingRankedStart = rankedPrepared = false;
     playerBoard.resetRound();
     hud.setLoading(null);
     playerBoard.updateScore(0, mode === 'challenge');
-    if (mode === 'challenge' && ready && city.state.some((s) => s !== 0)) void rebuild();
+    if (ready) {
+      if (rebuilding) queuedModeRebuild = true;
+      else void rebuild({ repair: false, restore: mode === 'sandbox' });
+    }
   },
 }) : null;
 mission?.mountMenu(hud.menu);
@@ -701,7 +714,9 @@ async function start(): Promise<void> {
     view.scene.add(cityAmbience.object);
     cityLife = new CityLife(city, cityStatic);
     view.scene.add(cityLife.object);
-    cityGuide?.setLandmarks(cityBuildings);
+    cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
+    districtSigns = new DistrictSigns(city);
+    view.scene.add(districtSigns.object);
     streetDetails = new StreetDetails(city);
     view.scene.add(streetDetails.object);
     cityJobs = new CityJobs(city, playerBoard.profile.playerId, () => pausePlay(), (text, complete) => {
@@ -768,7 +783,7 @@ async function start(): Promise<void> {
     saveProfile(profile);
   }
   applyProfile(profile);
-  if (SCENE === 'city') restoreCityPose();
+  if (SCENE === 'city') { restoreWorldDamage();cityJobs?.reset(city);restoreCityPose(); }
 
   await loader.finish();
   ready = true;
@@ -837,7 +852,7 @@ function applyProfile(p: DeviceProfile): void {
  * and physics, nothing in flight or pending, the smoke and chips cleared, the player (and the
  * car) back where they began.
  */
-async function rebuild(): Promise<void> {
+async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:true}): Promise<void> {
   if (!ready || rebuilding) return;
   rebuilding = true;
   playSequence++;
@@ -846,6 +861,7 @@ async function rebuild(): Promise<void> {
   held = wantFire = aiming = dragLook = false;
   keys.clear();
   hud.setLoading('正在重建街区…');
+  hud.menu.querySelectorAll<HTMLButtonElement>('.mission-mode button').forEach(b => { b.disabled = true; });
   // Finish the old GPU readback before replacing the world it refers to.
   while (reading) await new Promise<void>((r) => setTimeout(r, 10));
   alarms.clear();
@@ -872,6 +888,14 @@ async function rebuild(): Promise<void> {
   view.setPaints(city, physics.voxelOf);
   view.attachBalls(physics.spares);
   player.debrisCount = 0;
+  if(SCENE==='city'){
+    if(options.restore)restoreWorldDamage();
+    else if(options.repair && worldMode==='sandbox'){
+      const result=clearDamage(damageStorage,playerBoard.profile.playerId,city);damageSerialized='';cityJobs?.setDamageSaveStatus(result.ok,result.error);
+    }
+    districtSigns?.reset(city);
+    cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
+  }
   streetDetails?.reset(city);
   cityLife?.reset(city, cityStatic);
   cityJobs?.reset(city);
@@ -884,10 +908,17 @@ async function rebuild(): Promise<void> {
   accumulator = 0;
   timeScale = 1;
   mission?.reset(city.state);
+  if(options.restore)restoreCityPose();
   pausePlay();
   if (mission) playerBoard.updateScore(0, mission.snapshot.mode === 'challenge');
   hud.setLoading(null);
   rebuilding = false;
+  if (queuedModeRebuild) {
+    queuedModeRebuild = false;
+    await rebuild({repair:false,restore:worldMode==='sandbox'});
+    return;
+  }
+  hud.menu.querySelectorAll<HTMLButtonElement>('.mission-mode button').forEach(b => { b.disabled = false; });
   saveCityPose();
 }
 
@@ -910,9 +941,30 @@ function placeCar(): boolean {
   return true;
 }
 
+/** Restore CPU structure and GPU bodies together before the first visible gameplay frame. */
+function restoreWorldDamage():void {
+  if(SCENE!=='city'||worldMode!=='sandbox')return;
+  const loaded=loadDamage(damageStorage,playerBoard.profile.playerId,city);
+  const removed=damagedVoxels(loaded.snapshot);
+  structure.leave(removed);physics.remove(removed);damageSerialized=JSON.stringify(loaded.snapshot);
+  for (const voxels of unsupportedInteriorFurniture(city)) { structure.leave(voxels);physics.remove(voxels); }
+  const note=loaded.status==='mismatched'?'建筑布局已更新，旧损坏存档未套用；金币和任务保留':loaded.status==='invalid'?'损坏存档无法读取，街区已恢复；金币和任务保留':'';
+  cityJobs?.setDamageSaveStatus(loaded.status!=='unavailable',note);
+  streetDetails?.update(city.state);
+}
+function saveWorldDamage():void {
+  if(!ready||rebuilding||SCENE!=='city'||worldMode!=='sandbox')return;
+  const snapshot=captureDamage(city),serialized=JSON.stringify(snapshot);
+  if(serialized===damageSerialized)return;
+  const result=saveDamage(damageStorage,playerBoard.profile.playerId,snapshot);
+  if(result.ok)damageSerialized=serialized;
+  cityJobs?.setDamageSaveStatus(result.ok,result.error);
+}
+
 /** Persist only the sandbox; ranked sessions must not replace exploration progress. */
 function saveCityPose(): void {
   if (!ready || rebuilding || !car || !cityJobs || mission?.snapshot.mode !== 'sandbox') return;
+  saveWorldDamage();
   cityJobs.savePose({player:{x:player.position.x,y:player.position.y,z:player.position.z,yaw:player.yaw,driving},car:{x:car.position.x,y:car.position.y,z:0,yaw:car.heading,health:car.health}});
 }
 
@@ -930,7 +982,7 @@ function restoreCityPose(): void {
     physics.drive(carSlot,at,[0,0,Math.sin(saved.yaw/2),Math.cos(saved.yaw/2)],[0,0,0],[0,0,0]);
   }
   if (walker.driving && validCar && car.health>0) setDriving(true);
-  else if (!player.blocked(walker.x,walker.y,walker.z,1.8)) {
+  else if (!player.blocked(walker.x,walker.y,walker.z,1.8) && (walker.z<=.55||player.blocked(walker.x,walker.y,walker.z-.3,.3))) {
     player.position.set(walker.x,walker.y,walker.z);player.yaw=walker.yaw;
   }
   car.draw(1);
@@ -2399,6 +2451,7 @@ function tick(now: number): void {
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
+  districtSigns?.update(city);
   cityJobs?.update(dt, playing && ready && !document.hidden, { x: player.position.x, y: player.position.y, z: player.position.z, driving, flying: player.flying });
   saveElapsed += dt;
   if (saveElapsed >= 2) { saveCityPose(); saveElapsed = 0; }
@@ -2477,6 +2530,8 @@ if (testing) Object.assign(window, {
     get jobs() { return cityJobs; },
     get life() { return cityLife; },
     get ambience() { return cityAmbience; },
+    get district() { return city.district; },
+    saveDamage:saveWorldDamage,
     get staticColliders() { return cityStatic; },
     get freeLook() { return freeLook; },
     playerBoard,
@@ -2525,6 +2580,7 @@ addEventListener('pagehide', () => {
   car?.dispose();
   cityLife?.dispose();
   cityAmbience?.dispose();
+  districtSigns?.dispose();
   cityJobs?.dispose();
   streetDetails?.dispose();
   (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy();

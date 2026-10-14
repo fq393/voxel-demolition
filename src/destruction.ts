@@ -15,6 +15,7 @@
 import { Bond, type CityPhysics, type Motion, turning } from './physics.ts';
 import type { Structure } from './structure.ts';
 import { buildingsNear, type City, FLOORS, isGlass, State, VOXEL } from './world.ts';
+import { unsupportedInteriorFurniture } from './district-support.ts';
 
 export interface Hit {
   at: number[];
@@ -293,6 +294,12 @@ export function blasts(city: City, structure: Structure, physics: CityPhysics, h
       }
       result.falling.push(...piece.voxels);
     }
+  }
+  // Separate upper-floor furniture follows its floor rather than keeping a floating local anchor.
+  for (const voxels of unsupportedInteriorFurniture(city)) {
+    structure.leave(voxels);
+    physics.loosen(voxels, () => Bond.Fragment);
+    result.falling.push(...voxels);
   }
   // Everything loose near each blast (freshly or already) is thrown
   for (const { at, radius, push } of hits) physics.blast(at, radius * 1.6, push);

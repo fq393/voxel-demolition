@@ -77,7 +77,7 @@ body.touch .city-guide kbd { display:none; }
 `;
 
 const MAP_SIZE = 168;
-const WORLD_HALF = 36;
+const WORLD_HALF = 72;
 const EDGE_PADDING = 9;
 const BLOCK_PITCH = 46;
 function finite(value: number): number { return Number.isFinite(value) ? value : 0; }

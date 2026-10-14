@@ -49,7 +49,7 @@ test('garage east doorway admits a vehicle while sides, back and roof block move
     assert.equal(police.blocksPlayer(x, y, 0, 1.8), true);
   assert.equal(police.blocksPlayer(-35, -10, 2, 1.8), true);
   assert.equal(police.rayHit([-30, -10, 1.5], [-1, 0, 0], 5), null, 'east doorway should be clear');
-  assert.equal(police.rayHit([-35, -10, 1.5], [0, 1, 0], 10), 3.7);
+  assert.ok(Math.abs(police.rayHit([-35, -10, 1.5], [0, 1, 0], 10)! - 3.7) < 1e-12);
   assert.equal(police.rayHit([-35, -10, 1.5], [0, 0, 1], 10), 1.4500000000000002);
   police.dispose();
 });

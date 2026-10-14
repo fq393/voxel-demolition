@@ -101,3 +101,25 @@ gpuTest('windows shatter whole, and no glass falls as voxels', async (device) =>
   buffer.destroy();
 });
 
+
+gpuTest('ball poses share the compact GPU gather without contaminating voxel and section ranges', async (device) => {
+  const city = buildCity();
+  const buffer = device.createBuffer({ size: bodyCapacity(city) * BODY_FLOATS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const physics = new CityPhysics(device, city, buffer);
+  try {
+    const ball = physics.throwBall([100, 100, 20], [10, 0, 0], .55, 3);
+    for (let k = 0; k < 6; k++) physics.step();
+    const read = await physics.readLoose([ball]);
+    assert.equal(read.data.length, 0);
+    assert.equal(read.sectionData.length, 0);
+    assert.equal(read.spareData.length, 12);
+    assert.ok(read.spareData.every(Number.isFinite));
+    assert.ok(read.spareData[0] > 100.5 && read.spareData[0] < 102);
+    assert.ok(read.spareData[2] < 20 && read.spareData[2] > 19);
+    physics.loosen([0]);
+    const mixed = await physics.readLoose([ball]);
+    assert.equal(mixed.data.length, 12);
+    assert.equal(mixed.spareData.length, 12);
+    assert.ok(mixed.spareData[0] > 100.5);
+  } finally { physics.destroy(); buffer.destroy(); }
+});

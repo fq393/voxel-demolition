@@ -1,7 +1,7 @@
 import type { PoliceCommand, WantedPhase } from './police-types.ts';
-export type Crime = 'shot' | 'damage' | 'explosion' | 'crash' | 'mission';
-const HEAT: Record<Crime, number> = { shot: 6, damage: 10, explosion: 26, crash: 16, mission: 65 };
-const INTERVAL: Record<Crime, number> = { shot: .25, damage: .5, explosion: .5, crash: 1, mission: 1 };
+export type Crime = 'shot' | 'damage' | 'explosion' | 'crash' | 'mission' | 'assault';
+const HEAT: Record<Crime, number> = { shot: 6, damage: 10, explosion: 26, crash: 16, mission: 65, assault: 85 };
+const INTERVAL: Record<Crime, number> = { shot: .25, damage: .5, explosion: .5, crash: 1, mission: 1, assault: .75 };
 /** Active simulation time only; sightings and fresh crimes are the sole pursuit target sources. */
 export class WantedState {
   enabled = true;

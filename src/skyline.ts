@@ -1,9 +1,9 @@
 // The city round the block: towers and mid-rises on the lots beyond the streets, for scale and
-// a skyline behind the tower. Drawn only (one instanced mesh of boxes, a facade shader with
-// floors, windows and lights left on). The same box transforms provide the city's solid
-// outer-building collision bounds. South and south-west lots stay open for coastal parks.
+// a skyline behind the tower. Healthy buildings share one instanced mesh and facade shader with
+// floors, windows and lights left on. DestructibleSkyline wraps this batch with shared cells;
+// these authored transforms are the stable layout. South-west lots remain coastal parks.
 
-import { abs, cameraPosition, float, floor, fract, hash, instanceColor, instanceIndex, normalWorld, positionWorld, select, smoothstep, step, varying, vec3 } from 'three/tsl';
+import { abs, attribute, cameraPosition, float, floor, fract, hash, instanceColor, instanceIndex, normalWorld, positionWorld, select, smoothstep, step, varying, vec3 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { type City, random } from './world.ts';
 import { isDistrictLot } from './district-layout.ts';
@@ -75,11 +75,11 @@ export function skyline(city: City, seed = 17): THREE.InstancedMesh {
  * floor, thin spandrels and mullions, reflecting the sky) and concrete blocks with ribbon
  * windows; a few rooms lit, dimly (it's day); roofs plain.
  */
-function facade(): THREE.MeshStandardNodeMaterial {
+export function facade(stableInstanceIds = false): THREE.MeshStandardNodeMaterial {
   const material = new THREE.MeshStandardNodeMaterial({ roughness: 0.85, metalness: 0 });
   const p = varying(positionWorld) as unknown as THREE.Node<'vec3'>;
   const n = varying(normalWorld) as unknown as THREE.Node<'vec3'>;
-  const curtain = varying(hash(instanceIndex.add(7))).greaterThan(0.68);
+  const curtain = varying(hash((stableInstanceIds ? attribute('facadeIndex', 'float') : instanceIndex).add(7))).greaterThan(0.68);
   const roof = n.z.greaterThan(0.5);
   const across = select(abs(n.x).greaterThan(0.5), p.y, p.x);
   const up = p.z.div(STOREY);

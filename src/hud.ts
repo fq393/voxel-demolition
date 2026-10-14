@@ -415,7 +415,7 @@ export class Hud {
           ? '开车撞穿护栏，或下车用火箭清场。看台、轮胎、围墙，都能拆。'
           : space
             ? '在零重力里拆空间站。切断支架，看太阳翼飘走；轰开舱体，看碎块散进太空。'
-            : '开车逛暖色街区、进屋拆家具。开火会引来警察，躲进西侧车库避风头；也可关闭追逐自由拆。按 G 接仓库脱身任务，攒金币换车。'
+            : '全城人物、车辆和楼体都能破坏：打穿墙块，拆掉支撑让高楼坍塌。攻击会引来警察，西侧绿色地块能避风头。刷新保留损坏，按 R 重建；G 接任务和换车。'
       }</p>
       <div class="buttons"><button class="play">${track ? '开始驾驶' : space ? '开始拆除' : '出发逛城'}</button></div>
       <details class="control-help"><summary>操作说明</summary><div class="grid tap">

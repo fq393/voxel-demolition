@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { type StaticBox } from './city-colliders.ts';
 
 type Point = readonly [number, number, number];
-type Placement = { position: Point; scale: Point; color: number; heading: number };
+type Placement = { position: Point; scale: Point; color: number; heading: number; owner?: StaticBox };
 type Batch = { geometry: THREE.BufferGeometry; material: THREE.MeshStandardNodeMaterial; placements: Placement[]; shadow: boolean };
 
 const CREAM = 0xf4e5c6;
@@ -30,6 +30,9 @@ export class CityAmbience {
   private readonly batches = new Map<string, Batch>();
   private readonly geometries = new Set<THREE.BufferGeometry>();
   private readonly materials = new Set<THREE.Material>();
+  private attached: { mesh: THREE.InstancedMesh; index: number; matrix: THREE.Matrix4; anchors: Point[]; visible: boolean }[] = [];
+  private currentOwner: StaticBox | undefined;
+  private destructionRevision = -1;
   private palms = 0;
   private storefronts = 0;
   private cafeTables = 0;
@@ -63,6 +66,21 @@ export class CityAmbience {
         transform.rotation.set(0, 0, p.heading);
         transform.updateMatrix();
         mesh.setMatrixAt(i, transform.matrix);
+        if (p.owner) {
+          const b=p.owner;
+          const anchors: Point[]=[];
+          const cos=Math.cos(p.heading),sin=Math.sin(p.heading);
+          // Large shopfronts and roof trims disappear if their supporting edge is broken,
+          // instead of leaving a full panel floating across a real hole.
+          const count=Math.max(1,Math.ceil(Math.max(p.scale[0],p.scale[1])/2));
+          for(let sample=0;sample<=count;sample++) {
+            const along=(sample/count-.5)*Math.max(p.scale[0],p.scale[1]);
+            const x=p.position[0]+(p.scale[0]>=p.scale[1]?cos:-sin)*along;
+            const y=p.position[1]+(p.scale[0]>=p.scale[1]?sin:cos)*along;
+            anchors.push([Math.max(b.minX+.01,Math.min(b.maxX-.01,x)),Math.max(b.minY+.01,Math.min(b.maxY-.01,y)),Math.max(b.minZ+.01,Math.min(b.maxZ-.01,p.position[2]))]);
+          }
+          this.attached.push({mesh,index:i,matrix:transform.matrix.clone(),anchors,visible:true});
+        }
         mesh.setColorAt(i, color.setHex(p.color));
       });
       mesh.instanceMatrix.needsUpdate = true;
@@ -78,6 +96,18 @@ export class CityAmbience {
     this.diagnostics = Object.freeze({ drawCalls, shadowDrawCalls, triangles, instances, geometries: this.geometries.size, materials: this.materials.size, textures: 0, palms: this.palms, dressedBuildings: near.length, storefronts: this.storefronts, cafeTables: this.cafeTables, groundColliders: this.colliders.length });
   }
 
+  /** Keep facade/roof dressing in step with the same occupied cells used by weapons. */
+  updateDestruction(skyline: { surfacePresent(x:number,y:number,z:number):boolean; readonly revision?:number }): void {
+    if(typeof skyline.revision==='number'&&skyline.revision===this.destructionRevision)return;
+    if(typeof skyline.revision==='number')this.destructionRevision=skyline.revision;
+    const hidden=new THREE.Matrix4().makeScale(0,0,0);
+    for(const part of this.attached) {
+      const visible=part.anchors.every(([x,y,z])=>skyline.surfacePresent(x,y,z));
+      if(visible===part.visible)continue;
+      part.visible=visible;part.mesh.setMatrixAt(part.index,visible?part.matrix:hidden);part.mesh.instanceMatrix.needsUpdate=true;
+    }
+  }
+
   dispose(): void {
     this.object.removeFromParent();
     this.object.traverse((child) => { if (child instanceof THREE.InstancedMesh) child.dispose(); });
@@ -88,6 +118,7 @@ export class CityAmbience {
     this.materials.clear();
     this.batches.clear();
     this.colliders.length = 0;
+    this.attached.length = 0;
   }
 
   private createKit(): void {
@@ -129,7 +160,7 @@ export class CityAmbience {
   }
 
   private put(role: string, position: Point, scale: Point, color: number, heading = 0): void {
-    this.batches.get(role)!.placements.push({ position, scale, color, heading });
+    this.batches.get(role)!.placements.push({ position, scale, color, heading, owner:this.currentOwner });
   }
 
   private solid(position: Point, scale: Point, color = CREAM, heading = 0): void {
@@ -145,6 +176,7 @@ export class CityAmbience {
   }
 
   private building(b: StaticBox, index: number, all: readonly StaticBox[]): void {
+    this.currentOwner=b;
     const cx = (b.minX + b.maxX) / 2;
     const cy = (b.minY + b.maxY) / 2;
     const w = b.maxX - b.minX;
@@ -176,6 +208,7 @@ export class CityAmbience {
       if (all.some((other) => other !== b && outX > other.minX && outX < other.maxX && outY > other.minY && outY < other.maxY)) return;
       this.shop(fx, fy, nx, ny, Math.min(5.8, length - 0.8), index + side);
     });
+    this.currentOwner=undefined;
   }
 
   private shop(x: number, y: number, nx: number, ny: number, width: number, index: number): void {

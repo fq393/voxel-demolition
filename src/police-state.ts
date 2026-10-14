@@ -3,6 +3,10 @@ import type { PoliceFrame, PoliceProbes, PoliceStep, PoliceUnit } from './police
 
 const STEP = 1 / 60;
 const ROADS = [-69, -23, 23, 69];
+/** Shared patrol-road bounds for both live movement and restored healthy cars. */
+export function policeOnRoad(x:number,y:number):boolean {
+  return Number.isFinite(x)&&Number.isFinite(y)&&ROADS.some(road=>Math.abs(x-road)<6.7||Math.abs(y-road)<6.7);
+}
 type Point = readonly [number, number];
 interface Brain {
   lane: number; route: Point[]; goal: Point; replan: number; blocked: number;
@@ -28,7 +32,7 @@ export class PoliceSimulation {
     Object.assign(this.diagnostics, { time: 0, carStops: 0, officerStops: 0, replans: 0, seen: false, catchProgress: 0 });
     for (let id = 0; id < 2; id++) {
       const lane = id ? 6.1 : -6.1, x = id ? 69 : -23 + lane, y = id ? 23 + lane : -69;
-      this.units.push({ id, x, y, heading: id ? Math.PI : Math.PI / 2, speed: 0, wheelPhase: 0, mode: 'patrol',
+      this.units.push({ id, x, y, heading: id ? Math.PI : Math.PI / 2, speed: 0, wheelPhase: 0, mode: 'patrol', carDestroyed:false, officerDestroyed:false,
         officer: { x, y, heading: 0, moving: false, phase: 0, active: false } });
       this.brains.push({ lane, route: [], goal: [x, y], replan: 0, blocked: 0, reverse: 0, yield: 0, patrol: id ? 2 : 0, caught: 0, officerRoute: [], officerGoal: [x, y], officerReplan: 0 });
     }
@@ -55,6 +59,9 @@ export class PoliceSimulation {
     let seen = false, caught = false;
     for (const unit of this.units) {
       const brain = this.brains[unit.id];
+      if(unit.carDestroyed && unit.officerDestroyed){unit.speed=0;unit.officer.active=false;brain.caught=0;continue;}
+      if(unit.officerDestroyed){unit.officer.active=false;unit.officer.moving=false;unit.speed=0;unit.mode='patrol';brain.caught=0;continue;}
+      if(unit.carDestroyed){unit.speed=0;unit.officer.moving=false;if(!unit.officerDestroyed&&!unit.officer.active)this.exit(unit,frame);}
       brain.replan -= STEP;
       brain.officerReplan -= STEP;
       unit.mode = target ? frame.wanted.phase === 'search' ? 'search' : 'chase' : 'patrol';
@@ -71,14 +78,14 @@ export class PoliceSimulation {
       }
       const nearGoal = target && (distance([unit.x, unit.y], goal) < 3
         || frame.player.driving && distance([unit.x, unit.y], [target[0], target[1]]) < 5);
-      if (!unit.officer.active) {
+      if (!unit.officer.active && !unit.carDestroyed) {
         this.drive(unit, brain, frame, nearGoal ? 0 : unit.mode === 'patrol' ? 5.5 : 11);
         if (nearGoal && frame.player.driving && target) this.approach(unit, [target[0], target[1]], frame);
       }
       else unit.speed = 0;
-      if (nearGoal && !frame.player.driving && unit.speed < 0.5 && target && !unit.officer.active) this.exit(unit, frame);
+      if (!unit.officerDestroyed && nearGoal && !frame.player.driving && unit.speed < 0.5 && target && !unit.officer.active) this.exit(unit, frame);
       if (unit.officer.active) {
-        if (!target || frame.player.driving || distance([unit.officer.x, unit.officer.y], [target[0], target[1]]) > 38) {
+        if (!unit.carDestroyed && (!target || frame.player.driving || distance([unit.officer.x, unit.officer.y], [target[0], target[1]]) > 38)) {
           // Board only after physically returning to the car, never teleport across a room.
           this.walk(unit, [unit.x, unit.y], frame, true);
           if (distance([unit.officer.x, unit.officer.y], [unit.x, unit.y]) < 1.5) unit.officer.active = false;
@@ -87,11 +94,11 @@ export class PoliceSimulation {
       const eye: readonly [number, number, number] = unit.officer.active
         ? [unit.officer.x, unit.officer.y, 1.65] : [unit.x, unit.y, 1.45];
       const range = unit.officer.active ? 32 : 42;
-      const visible = active && Math.hypot(eye[0] - frame.player.x, eye[1] - frame.player.y, eye[2] - (frame.player.z + 1.3)) < range
+      const visible = !unit.officerDestroyed && (!unit.carDestroyed || unit.officer.active) && active && Math.hypot(eye[0] - frame.player.x, eye[1] - frame.player.y, eye[2] - (frame.player.z + 1.3)) < range
         && this.probes.visible(eye, [frame.player.x, frame.player.y, frame.player.z + 1.3]);
       seen ||= visible;
       const close = frame.player.driving ? !!frame.car && Math.abs(frame.car.speed) < 1.5
-        && distance([unit.x, unit.y], [frame.car.x, frame.car.y]) < 5
+        && distance(unit.carDestroyed ? [unit.officer.x,unit.officer.y] : [unit.x, unit.y], [frame.car.x, frame.car.y]) < 5
         : unit.officer.active && distance([unit.officer.x, unit.officer.y], [frame.player.x, frame.player.y]) <= 1.5;
       const eligible = visible && close && !frame.player.flying && frame.player.z >= -0.2 && frame.player.z < 1.1;
       brain.caught = eligible ? brain.caught + STEP : 0;
@@ -257,7 +264,7 @@ export class PoliceSimulation {
   }
 
   private onRoad(x: number, y: number): boolean {
-    return ROADS.some(road => Math.abs(x - road) < 6.7 || Math.abs(y - road) < 6.7);
+    return policeOnRoad(x,y);
   }
 
   private carBlocked(unit: PoliceUnit, x: number, y: number, heading: number, frame: PoliceFrame): boolean {
@@ -265,9 +272,9 @@ export class PoliceSimulation {
     const body: RoadBody = { x, y, heading, halfLength: 2.15, halfWidth: 0.92 };
     if (frame.car && vehicleFootprintsOverlap(body, frame.car, 0.08)) return true;
     for (const car of frame.traffic) if (vehicleFootprintsOverlap(body, car, 0.08)) return true;
-    for (const other of this.units) if (other !== unit && vehicleFootprintsOverlap(body, other, 0.08)) return true;
+    for (const other of this.units) if (!other.carDestroyed && other !== unit && vehicleFootprintsOverlap(body, other, 0.08)) return true;
     for (const person of frame.pedestrians) if (pointNearVehicle(person.x, person.y, body, 0.4)) return true;
-    for (const other of this.units) if (other.officer.active && pointNearVehicle(other.officer.x, other.officer.y, body, 0.4)) return true;
+    for (const other of this.units) if (!other.officerDestroyed && other.officer.active && pointNearVehicle(other.officer.x, other.officer.y, body, 0.4)) return true;
     return !frame.player.driving && frame.player.z < 1.6 && pointNearVehicle(frame.player.x, frame.player.y, body, 0.4);
   }
 
@@ -283,8 +290,8 @@ export class PoliceSimulation {
     if (this.probes.officerBlocked(x, y)) return true;
     if (frame.car && pointNearVehicle(x, y, frame.car, 0.28)) return true;
     for (const car of frame.traffic) if (pointNearVehicle(x, y, car, 0.28)) return true;
-    for (const other of this.units) if ((!boarding || other !== unit) && pointNearVehicle(x, y, other, 0.28)) return true;
-    for (const other of this.units) if (other !== unit && other.officer.active && Math.hypot(other.officer.x - x, other.officer.y - y) < 0.65) return true;
+    for (const other of this.units) if (!other.carDestroyed && (!boarding || other !== unit) && pointNearVehicle(x, y, other, 0.28)) return true;
+    for (const other of this.units) if (other !== unit && !other.officerDestroyed && other.officer.active && Math.hypot(other.officer.x - x, other.officer.y - y) < 0.65) return true;
     for (const person of frame.pedestrians) if (Math.hypot(person.x - x, person.y - y) < 0.65) return true;
     return !frame.player.driving && frame.player.z < 1.6 && Math.hypot(frame.player.x - x, frame.player.y - y) < 0.68;
   }
@@ -309,7 +316,7 @@ export class PoliceSimulation {
       let value = this.probes.officerBlocked(x, y);
       if (!value && frame.car) value = pointNearVehicle(x, y, frame.car, 0.28);
       if (!value) for (const car of frame.traffic) if (pointNearVehicle(x, y, car, 0.28)) { value = true; break; }
-      if (!value) for (const other of this.units) if ((!boarding || other !== unit) && pointNearVehicle(x, y, other, 0.28)) { value = true; break; }
+      if (!value) for (const other of this.units) if (!other.carDestroyed && (!boarding || other !== unit) && pointNearVehicle(x, y, other, 0.28)) { value = true; break; }
       blocked[i] = value ? 1 : 0; return value;
     };
     const pending = [from]; costs[from] = 0;

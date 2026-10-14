@@ -1,4 +1,6 @@
 import * as THREE from 'three/webgpu';
+import { damageBody, damageBodies, nearestDamageRay, snapshotBodies, restoreBodies, tickDamage, bodyFade, type DamageBody } from './actor-damage.ts';
+import type { WorldDamageRequest, WorldDamageEvent, DamageTarget } from './world-damage-types.ts';
 import { type City, State, VOXEL } from './world.ts';
 import { Player } from './player.ts';
 import { overlapsPlayer, overlapsVehicle, type StaticBox } from './city-colliders.ts';
@@ -75,10 +77,15 @@ export class CityLife {
   private readonly yAxis = new THREE.Vector3(0, 1, 0);
   private readonly collisionBody: RoadBody = { x: 0, y: 0, heading: 0, halfLength: 2.3, halfWidth: 1 };
   private boxIndex = 0;
+  private allCars: CityLifeState['cars'] = [];
+  private allPeople: CityLifeState['pedestrians'] = [];
+  private damageBodies: DamageBody[] = [];
+  private renderBody: DamageBody | null = null;
+  private disposed = false;
 
   constructor(city: City, staticBoxes: readonly StaticBox[]) {
     this.city = city; this.staticBoxes = staticBoxes; this.probe = this.createProbe();
-    this.simulation = this.createSimulation();
+    this.simulation = this.createSimulation(); this.initDamage();
     this.object.name = 'city-life';
     const common = new THREE.MeshStandardNodeMaterial({ roughness: 0.67, metalness: 0.12 });
     const paint = new THREE.MeshStandardNodeMaterial({ roughness: 0.34, metalness: 0.42 });
@@ -109,12 +116,13 @@ export class CityLife {
 
   update(dt: number, frame: LifeFrame): void {
     this.simulation.update(dt, frame);
+    tickDamage(this.damageBodies, dt);
     this.render();
   }
 
   reset(city: City, staticBoxes: readonly StaticBox[]): void {
     this.city = city; this.staticBoxes = staticBoxes;
-    this.probe = this.createProbe(); this.simulation = this.createSimulation();
+    this.probe = this.createProbe(); this.simulation = this.createSimulation(); this.initDamage();
     this.render();
   }
 
@@ -132,23 +140,75 @@ export class CityLife {
     return false;
   }
 
-  /** Includes people and traffic in camera/weapon occlusion without awarding voxel points. */
+  setStaticBoxes(boxes: readonly StaticBox[]): void { this.staticBoxes = boxes; }
+
+  damageRay(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): DamageTarget | null {
+    return nearestDamageRay(this.damageBodies, origin, direction, reach);
+  }
   rayHit(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): number | null {
-    let nearest = reach, hit = false;
-    for (const car of this.state.cars) {
-      const value = this.rayBody(origin, direction, car.x, car.y, car.heading, 2.15, 0.92, 0.12, 1.34, nearest);
-      if (value !== null) { nearest = value; hit = true; }
+    return this.damageRay(origin, direction, reach)?.t ?? null;
+  }
+  damage(request: WorldDamageRequest): WorldDamageEvent[] {
+    const events = damageBodies(this.damageBodies, request);
+    if (events.length) { this.refreshLiving(); this.render(); }
+    return events;
+  }
+  snapshotDamage(): object { return snapshotBodies(this.damageBodies); }
+  restoreDamage(value: unknown): boolean {
+    const source=value as {bodies?:{x?:unknown;y?:unknown;hp?:unknown}[]} | null;
+    if(!source||!Array.isArray(source.bodies)||source.bodies.length!==this.damageBodies.length)return false;
+    const plans:{distance:number;x:number;y:number;heading:number}[]=[];
+    const actors=[...this.allCars,...this.allPeople];
+    // Validate routes before restoreBodies mutates any health or pose. Dead bodies
+    // retain their last city pose but never re-enter street AI.
+    for(let index=0;index<actors.length;index++){
+      const saved=source.bodies[index],actor=actors[index];
+      if(!saved||typeof saved.x!=='number'||typeof saved.y!=='number'||!Number.isFinite(saved.x)||!Number.isFinite(saved.y)||Math.abs(saved.x)>180||Math.abs(saved.y)>180)return false;
+      const person='offsetX' in actor;
+      const route=person?this.state.walkRoutes[actor.route]:this.state.routes[actor.route];
+      let best=Infinity,plan={distance:0,x:0,y:0,heading:0};
+      for(let i=0;i<route.points.length;i++){
+        const a=route.points[i],b=route.points[(i+1)%route.points.length],dx=b[0]-a[0],dy=b[1]-a[1],length=route.lengths[i];
+        const f=Math.max(0,Math.min(1,((saved.x-a[0])*dx+(saved.y-a[1])*dy)/(length*length)));
+        const x=a[0]+dx*f,y=a[1]+dy*f,d=Math.hypot(saved.x-x,saved.y-y);
+        if(d<best){best=d;plan={distance:route.cumulative[i]+f*length,x,y,heading:Math.atan2(dy,dx)};}
+      }
+      // Traffic is generated exactly on its route; rejecting off-route poses
+      // prevents a forged save snapping a healthy car to a distant lane.
+      if(typeof saved.hp==='number'&&saved.hp>0&&best>(person?3:1e-6))return false;
+      plans.push(plan);
     }
-    for (const p of this.state.pedestrians) {
-      const value = this.rayBody(origin, direction, p.x, p.y, p.heading, 0.23, 0.27, 0, 1.78, nearest);
-      if (value !== null) { nearest = value; hit = true; }
-    }
-    return hit ? nearest : null;
+    if(!restoreBodies(this.damageBodies,value))return false;
+    actors.forEach((actor,index)=>{
+      const plan=plans[index];actor.distance=plan.distance;
+      if('offsetX' in actor){
+        const p=actor as CityLifeState['pedestrians'][number];
+        const laneX=p.crossing?0:-Math.sin(plan.heading)*p.direction*.36;
+        const laneY=p.crossing?0:Math.cos(plan.heading)*p.direction*.36;
+        p.offsetX=p.x-plan.x-laneX;p.offsetY=p.y-plan.y-laneY;p.moving=false;
+      }else (actor as CityLifeState['cars'][number]).speed=0;
+    });
+    this.refreshLiving();this.render();return true;
+  }
+  private initDamage(): void {
+    this.allCars = [...this.state.cars]; this.allPeople = [...this.state.pedestrians];
+    this.damageBodies = [
+      ...this.allCars.map(car => damageBody(`life-car:${car.id}`, 'vehicle', car, 2.15,.92,.12,1.34,120,CAR_PAINT[car.id])),
+      ...this.allPeople.map(p => damageBody(`life-person:${p.id}`, 'person', p,.23,.27,0,1.78,60,SHIRTS[p.id%SHIRTS.length])),
+    ];
+  }
+  private refreshLiving(): void {
+    for(const c of this.allCars)if(this.damageBodies[c.id].hp===0)c.speed=0;
+    for(const p of this.allPeople)if(this.damageBodies[8+p.id].hp===0){p.moving=false;p.scared=0;}
+    this.state.cars.splice(0,this.state.cars.length,...this.allCars.filter(c => this.damageBodies[c.id].hp>0));
+    this.state.pedestrians.splice(0,this.state.pedestrians.length,...this.allPeople.filter(p => this.damageBodies[8+p.id].hp>0));
+    this.diagnostics.cars=this.state.cars.length; this.diagnostics.pedestrians=this.state.pedestrians.length;
   }
 
   scare(x: number, y: number, radius: number): void { this.simulation.scare(x, y, radius); }
 
   dispose(): void {
+    if(this.disposed)return;this.disposed=true;
     for (const child of this.object.children) if (child instanceof THREE.InstancedMesh) child.dispose();
     for (const geometry of this.geometries) geometry.dispose();
     for (const material of this.materials) material.dispose();
@@ -180,13 +240,17 @@ export class CityLife {
   private place(mesh: THREE.InstancedMesh, index: number, x: number, y: number, heading: number,
     lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color?: number, tilt = 0): void {
     const c = Math.cos(heading), s = Math.sin(heading);
-    this.position.set(x + c * lx - s * ly, y + s * lx + c * ly, lz);
-    this.scale.set(sx, sy, sz);
+    const b=this.renderBody, fade=b ? bodyFade(b) : 1;
+    const fall=b?.hp===0 ? Math.min(1,b.age/.65)*(b.kind==='person'?Math.PI/2:.18) : 0;
+    const localX=lx*Math.cos(fall)+lz*Math.sin(fall),localZ=lz*Math.cos(fall)-lx*Math.sin(fall);
+    this.position.set(x + c * localX - s * ly, y + s * localX + c * ly, localZ+(fall?.14:0));
+    this.scale.set(sx*fade, sy*fade, sz*fade*(b?.hp===0&&b.kind==='vehicle'?.65:1));
     this.rotation.setFromAxisAngle(this.zAxis, heading);
+    if (fall) this.rotation.multiply(this.lean.setFromAxisAngle(this.yAxis, fall));
     if (tilt) this.rotation.multiply(this.lean.setFromAxisAngle(this.yAxis, tilt));
     this.matrix.compose(this.position, this.rotation, this.scale);
     mesh.setMatrixAt(index, this.matrix);
-    if (color !== undefined) mesh.setColorAt(index, this.colour.setHex(color));
+    if (color !== undefined) mesh.setColorAt(index, this.colour.setHex(b && b.flash>0 ? 0xffecd1 : b?.hp===0 ? 0x4a4a43 : color));
   }
 
   private trim(x: number, y: number, h: number, lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: number, tilt = 0): void {
@@ -197,7 +261,8 @@ export class CityLife {
     this.boxIndex = 0;
     const { state } = this;
     let movingCars = 0, walkers = 0, frightened = 0;
-    for (const car of state.cars) {
+    for (const car of this.allCars) {
+      this.renderBody=this.damageBodies[car.id];
       const { x, y, heading: h, id } = car;
       const paint = CAR_PAINT[id], tall = id % 3 === 1 ? 1.13 : 1;
       this.place(this.bodies, id, x, y, h, 0, 0, 0, 1, 1, 1, paint);
@@ -220,7 +285,8 @@ export class CityLife {
       }
       if (car.speed > 0.3) movingCars++;
     }
-    for (const p of state.pedestrians) {
+    for (const p of this.allPeople) {
+      this.renderBody=this.damageBodies[8+p.id];
       const { x, y, heading: h, id } = p, skin = SKIN[id % SKIN.length], shirt = SHIRTS[id % SHIRTS.length];
       const swing = p.moving ? Math.sin(p.phase) * (p.scared > 0 ? 0.65 : 0.42) : 0;
       this.trim(x, y, h, 0, 0, 1.12, 0.29, 0.39, 0.51, shirt);
@@ -244,6 +310,7 @@ export class CityLife {
       if (p.moving) walkers++;
       if (p.scared > 0) frightened++;
     }
+    this.renderBody=null;
     // A compact, two-sided mast at each bend gives the stop phases a visible cause.
     for (let i = 0; i < 4; i++) {
       const x = i < 2 ? 30.4 : -30.4, y = i === 0 || i === 3 ? -30.4 : 30.4;
@@ -259,24 +326,9 @@ export class CityLife {
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-    Object.assign(this.diagnostics, { movingCars, walkingPedestrians: walkers, frightenedPedestrians: frightened,
+    Object.assign(this.diagnostics, { cars:state.cars.length,pedestrians:state.pedestrians.length,movingCars, walkingPedestrians: walkers, frightenedPedestrians: frightened,
       signalPhase: state.signalPhase, signalStops: state.stops.signal, followStops: state.stops.following,
       pedestrianYields: state.stops.pedestrian, playerYields: state.stops.player, worldStops: state.stops.world });
   }
 
-  private rayBody(origin: ArrayLike<number>, direction: ArrayLike<number>, x: number, y: number, heading: number,
-    halfLength: number, halfWidth: number, minZ: number, maxZ: number, reach: number): number | null {
-    if (!(reach >= 0)) return null;
-    const c = Math.cos(heading), s = Math.sin(heading), dx = origin[0] - x, dy = origin[1] - y;
-    const ox = dx * c + dy * s, oy = -dx * s + dy * c;
-    const vx = direction[0] * c + direction[1] * s, vy = -direction[0] * s + direction[1] * c;
-    let near = 0, far = reach;
-    if (vx === 0) { if (Math.abs(ox) > halfLength) return null; }
-    else { const a = (-halfLength - ox) / vx, b = (halfLength - ox) / vx; near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b)); }
-    if (vy === 0) { if (Math.abs(oy) > halfWidth) return null; }
-    else { const a = (-halfWidth - oy) / vy, b = (halfWidth - oy) / vy; near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b)); }
-    if (direction[2] === 0) { if (origin[2] < minZ || origin[2] > maxZ) return null; }
-    else { const a = (minZ - origin[2]) / direction[2], b = (maxZ - origin[2]) / direction[2]; near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b)); }
-    return near <= far ? near : null;
-  }
 }

@@ -1,4 +1,6 @@
 import * as THREE from 'three/webgpu';
+import { damageBody, damageBodies, nearestDamageRay, snapshotBodies, restoreBodies, tickDamage, bodyFade, type DamageBody } from './actor-damage.ts';
+import type { WorldDamageRequest, WorldDamageEvent, DamageTarget } from './world-damage-types.ts';
 import { instanceColor } from 'three/tsl';
 import { type City, raycast, voxelAt } from './world.ts';
 import { Player } from './player.ts';
@@ -6,7 +8,7 @@ import { firstStaticHit, overlapsPlayer, overlapsVehicle, type StaticBox } from 
 import { trafficOverlapsWorld } from './city-life.ts';
 import { playerOverlapsCar } from './city-driving.ts';
 import { pointNearVehicle, vehicleFootprintsOverlap, type RoadBody } from './city-life-state.ts';
-import { PoliceSimulation } from './police-state.ts';
+import { PoliceSimulation, policeOnRoad } from './police-state.ts';
 import { GARAGE, type PoliceFrame, type PoliceStep } from './police-types.ts';
 
 const NAVY = 0x253a50, IVORY = 0xf0e4c9, RUBBER = 0x242b2d, GOLD = 0xd5b46b;
@@ -36,7 +38,14 @@ function profile(points: readonly (readonly [number, number])[], width: number):
 /** Two authored police sedans, uniformed officers and a garage in nine shared batches. */
 export class CityPolice {
   readonly object = new THREE.Group();
-  readonly colliders = garageColliders();
+  private readonly allGarage = garageColliders();
+  readonly colliders = [...this.allGarage];
+  colliderRevision = 0;
+  extraCarBlocked: ((x:number,y:number,heading:number)=>boolean) | null = null;
+  extraOfficerBlocked: ((x:number,y:number)=>boolean) | null = null;
+  extraRayHit: ((origin:readonly[number,number,number],direction:readonly[number,number,number],reach:number)=>number|null) | null = null;
+  private damageBodies: DamageBody[] = [];
+  private renderBody: DamageBody | null = null;
   private city: City;
   private staticBoxes: readonly StaticBox[];
   private probe: Player;
@@ -70,7 +79,7 @@ export class CityPolice {
 
   constructor(city: City, staticBoxes: readonly StaticBox[]) {
     this.city = city; this.staticBoxes = [...staticBoxes, ...this.colliders];
-    this.probe = this.createProbe(); this.simulation = this.createSimulation();
+    this.probe = this.createProbe(); this.simulation = this.createSimulation(); this.initDamage();
     this.object.name = 'city-police-and-garage';
     const trim = new THREE.MeshStandardNodeMaterial({ roughness: 0.7, metalness: 0.1 });
     const paint = new THREE.MeshStandardNodeMaterial({ roughness: 0.33, metalness: 0.4 });
@@ -96,10 +105,6 @@ export class CityPolice {
     this.lamps = this.batch('police-lightbars-and-garage-marker', box, signal, 16);
     this.shelter = this.batch('garage-walls-and-roof', box, trim, 6);
     for (const mesh of [this.glass, this.tyres, this.rims, this.heads, this.badges, this.lamps]) mesh.castShadow = false;
-    this.colliders.forEach((b, i) => this.place(this.shelter, i, 0, 0, 0,
-      (b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2,
-      b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ, i === 5 ? 0xd4b292 : 0xdca68d));
-    this.shelter.instanceMatrix.needsUpdate = true;
     this.render();
   }
 
@@ -110,28 +115,31 @@ export class CityPolice {
       triangles += (mesh.geometry.index?.count ?? mesh.geometry.attributes.position.count) / 3 * mesh.count;
     return { ...this.simulation.diagnostics, renderBatches: 9, geometries: this.geometries.length,
       materials: this.materials.length, triangles, garageColliders: this.colliders.length,
-      visibleOfficers: this.units.filter(unit => unit.officer.active).length };
+      destroyedCars:this.units.filter(u=>u.carDestroyed).length,destroyedOfficers:this.units.filter(u=>u.officerDestroyed).length,
+      visibleOfficers: this.units.filter(unit => unit.officer.active&&!unit.officerDestroyed).length };
   }
 
   update(dt: number, frame: PoliceFrame): PoliceStep {
     const result = this.simulation.update(dt, frame);
+    tickDamage(this.damageBodies,dt);
     if (Number.isFinite(dt) && dt > 0) this.time += Math.min(dt, 0.25);
     this.render(); return result;
   }
 
   reset(city: City, staticBoxes: readonly StaticBox[]): void {
-    this.city = city; this.staticBoxes = [...staticBoxes, ...this.colliders];
-    this.probe = this.createProbe(); this.simulation = this.createSimulation(); this.time = 0;
+    this.city = city; this.colliders.splice(0,this.colliders.length,...this.allGarage); this.colliderRevision++;
+    this.setStaticBoxes(staticBoxes);
+    this.probe = this.createProbe(); this.simulation = this.createSimulation(); this.initDamage(); this.time = 0;
     this.render();
   }
 
   blocksPlayer(x: number, y: number, z: number, height: number): boolean {
     if (overlapsPlayer(this.colliders, x, y, z, height)) return true;
     for (const unit of this.units) {
-      if (playerOverlapsCar(x, y, z, height, unit.x, unit.y, unit.heading, [4.3, 1.84, 1.36])) return true;
+      if (!unit.carDestroyed && playerOverlapsCar(x, y, z, height, unit.x, unit.y, unit.heading, [4.3, 1.84, 1.36])) return true;
       const p = unit.officer;
       const floor = this.officerFloor(p.x, p.y);
-      if (p.active && z < floor + 1.82 && z + height > floor && Math.abs(p.x - x) < 0.53 && Math.abs(p.y - y) < 0.53) return true;
+      if (!unit.officerDestroyed && p.active && z < floor + 1.82 && z + height > floor && Math.abs(p.x - x) < 0.53 && Math.abs(p.y - y) < 0.53) return true;
     }
     return false;
   }
@@ -140,25 +148,78 @@ export class CityPolice {
     if (overlapsVehicle(this.colliders, x, y, heading, size[0] / 2, size[1] / 2, size[2])) return true;
     Object.assign(this.body, { x, y, heading, halfLength: size[0] / 2, halfWidth: size[1] / 2 });
     for (const unit of this.units) {
-      if (vehicleFootprintsOverlap(this.body, { ...unit, halfLength: 2.15, halfWidth: 0.92 })) return true;
-      if (unit.officer.active && pointNearVehicle(unit.officer.x, unit.officer.y, this.body, 0.3)) return true;
+      if (!unit.carDestroyed && vehicleFootprintsOverlap(this.body, { ...unit, halfLength: 2.15, halfWidth: 0.92 })) return true;
+      if (!unit.officerDestroyed && unit.officer.active && pointNearVehicle(unit.officer.x, unit.officer.y, this.body, 0.3)) return true;
     }
     return false;
   }
 
+  setStaticBoxes(boxes: readonly StaticBox[]): void {
+    this.staticBoxes = [...boxes.filter(box=>!this.allGarage.includes(box)),...this.colliders];
+  }
+  damageRay(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): DamageTarget | null {
+    for(const unit of this.units){const b=this.damageBodies[unit.id*2+1],floor=this.officerFloor(unit.officer.x,unit.officer.y);b.minZ=floor;b.maxZ=floor+1.82;}
+    return nearestDamageRay(this.damageBodies,origin,direction,reach);
+  }
   rayHit(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): number | null {
-    let nearest = firstStaticHit(this.colliders, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
-    for (const unit of this.units) {
-      const value = this.rayBody(origin, direction, unit.x, unit.y, unit.heading, 2.15, 0.92, 0.12, 1.48, nearest ?? reach);
-      if (value !== null) nearest = value;
-      const p = unit.officer;
-      if (p.active) {
-        const floor = this.officerFloor(p.x, p.y);
-        const hit = this.rayBody(origin, direction, p.x, p.y, p.heading, 0.23, 0.27, floor, floor + 1.82, nearest ?? reach);
-        if (hit !== null) nearest = hit;
+    return this.damageRay(origin,direction,reach)?.t ?? null;
+  }
+  damage(request: WorldDamageRequest): WorldDamageEvent[] {
+    for(const unit of this.units){const b=this.damageBodies[unit.id*2+1],floor=this.officerFloor(unit.officer.x,unit.officer.y);b.minZ=floor;b.maxZ=floor+1.82;}
+    const events=damageBodies(this.damageBodies,request);
+    if(events.length){this.refreshDamage();this.render();}
+    return events;
+  }
+  snapshotDamage(): object { return {...snapshotBodies(this.damageBodies),officerActive:this.units.map(u=>u.officer.active&&!u.officerDestroyed)}; }
+  restoreDamage(value: unknown): boolean {
+    // Garage poses are authored coordinates, never arbitrary save-controlled walls.
+    const source=value as {officerActive?:unknown;bodies?:{x?:unknown;y?:unknown;heading?:unknown;hp?:unknown}[]} | null;
+    if(!source||!Array.isArray(source.officerActive)||source.officerActive.length!==2||!source.officerActive.every(v=>typeof v==='boolean'))return false;
+    if(!Array.isArray(source.bodies)||source.bodies.length!==10)return false;
+    const savedGarage=this.allGarage.filter((_,i)=>{const hp=source.bodies![4+i]?.hp;return typeof hp==='number'&&hp>0;});
+    const restoreProbe=new Player(this.city);
+    const restoreBoxes=[...this.staticBoxes.filter(b=>!this.allGarage.includes(b)),...savedGarage];
+    restoreProbe.extraBlocked=(x,y,z,height)=>overlapsPlayer(restoreBoxes,x,y,z,height);
+    for(let i=0;i<4;i++){
+      const saved=source.bodies[i];
+      if(!saved||typeof saved.x!=='number'||typeof saved.y!=='number'||!Number.isFinite(saved.x)||!Number.isFinite(saved.y)||Math.abs(saved.x)>180||Math.abs(saved.y)>180)return false;
+      if(typeof saved.hp==='number'&&saved.hp>0){
+        if(i%2===0){
+          if(!policeOnRoad(saved.x,saved.y))return false;
+          if(typeof saved.heading!=='number'||!Number.isFinite(saved.heading)||trafficOverlapsWorld(this.city,saved.x,saved.y,saved.heading)
+            ||overlapsVehicle(this.staticBoxes.filter(b=>!this.allGarage.includes(b)),saved.x,saved.y,saved.heading,2.15,.92))return false;
+        }else if((source.officerActive as boolean[])[Math.floor(i/2)]){
+          if(restoreProbe.blocked(saved.x,saved.y,.25,1.8)||this.extraOfficerBlocked?.(saved.x,saved.y))return false;
+        }
       }
     }
-    return nearest;
+    if(source?.bodies && Array.isArray(source.bodies))for(let i=4;i<10;i++){
+      const b=this.damageBodies[i],v=source.bodies[i];
+      if(!v||v.x!==b.pose.x||v.y!==b.pose.y||v.heading!==0)return false;
+    }
+    if(!restoreBodies(this.damageBodies,value))return false;
+    this.units.forEach((u,i)=>{u.officer.active=(source.officerActive as boolean[])[i]&&this.damageBodies[i*2+1].hp>0;});
+    this.refreshDamage();this.render();return true;
+  }
+  private initDamage(): void {
+    this.damageBodies=this.units.flatMap(unit=>[
+      damageBody(`police-car:${unit.id}`,'vehicle',unit,2.15,.92,.12,1.48,120,IVORY),
+      damageBody(`police-person:${unit.id}`,'person',unit.officer,.23,.27,0,1.82,60,NAVY,()=>unit.officer.active),
+    ]);
+    this.allGarage.forEach((b,i)=>this.damageBodies.push(damageBody(`garage:${i}`,'garage',
+      {x:(b.minX+b.maxX)/2,y:(b.minY+b.maxY)/2,heading:0},(b.maxX-b.minX)/2,(b.maxY-b.minY)/2,b.minZ,b.maxZ,100,0xdca68d)));
+  }
+  private refreshDamage(): void {
+    for(const unit of this.units){
+      unit.carDestroyed=this.damageBodies[unit.id*2].hp===0;
+      unit.officerDestroyed=this.damageBodies[unit.id*2+1].hp===0;
+      if(unit.carDestroyed)unit.speed=0;
+      if(unit.officerDestroyed){unit.officer.moving=false;unit.officer.active=false;}
+    }
+    const living=this.allGarage.filter((_,i)=>this.damageBodies[4+i].hp>0);
+    if(living.length!==this.colliders.length||living.some((b,i)=>b!==this.colliders[i])){
+      this.colliders.splice(0,this.colliders.length,...living);this.colliderRevision++;this.setStaticBoxes(this.staticBoxes);
+    }
   }
 
   dispose(): void {
@@ -179,8 +240,8 @@ export class CityPolice {
   private createSimulation(): PoliceSimulation {
     return new PoliceSimulation({
       carBlocked: (x, y, heading) => overlapsVehicle(this.staticBoxes, x, y, heading, 2.15, 0.92)
-        || trafficOverlapsWorld(this.city, x, y, heading),
-      officerBlocked: (x, y) => this.probe.blocked(x, y, 0.25, 1.8),
+        || trafficOverlapsWorld(this.city, x, y, heading) || !!this.extraCarBlocked?.(x,y,heading),
+      officerBlocked: (x, y) => this.probe.blocked(x, y, 0.25, 1.8) || !!this.extraOfficerBlocked?.(x,y),
       visible: (from, to) => {
         const origin: [number, number, number] = [from[0], from[1], from[2]];
         if (this.units.some(unit => unit.officer.active && Math.hypot(unit.officer.x - from[0], unit.officer.y - from[1]) < 0.01))
@@ -190,7 +251,7 @@ export class CityPolice {
         if (reach < 0.01) return true;
         const direction: [number, number, number] = [dx / reach, dy / reach, dz / reach];
         const wall = firstStaticHit(this.staticBoxes, origin, direction, reach - 0.05);
-        if (wall !== null) return false;
+        if (wall !== null || this.extraRayHit?.(origin,direction,reach-0.05) != null) return false;
         return raycast(this.city, origin, direction, reach - 0.05) === null;
       },
     });
@@ -213,11 +274,15 @@ export class CityPolice {
   private place(mesh: THREE.InstancedMesh, index: number, x: number, y: number, heading: number,
     lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color?: number, tilt = 0): void {
     const c = Math.cos(heading), s = Math.sin(heading);
-    this.position.set(x + c * lx - s * ly, y + s * lx + c * ly, lz + this.baseZ);
-    this.scale.set(sx, sy, sz); this.rotation.setFromAxisAngle(this.zAxis, heading);
+    const b=this.renderBody,fade=b?(b.kind==='garage'&&b.hp===0?0:bodyFade(b)):1;
+    const fall=b?.hp===0&&b.kind!=='garage'?Math.min(1,b.age/.65)*(b.kind==='person'?Math.PI/2:.18):0;
+    const localX=lx*Math.cos(fall)+lz*Math.sin(fall),localZ=lz*Math.cos(fall)-lx*Math.sin(fall);
+    this.position.set(x + c * localX - s * ly, y + s * localX + c * ly, localZ + this.baseZ+(fall?.14:0));
+    this.scale.set(sx*fade, sy*fade, sz*fade*(b?.hp===0&&b.kind==='vehicle'?.65:1)); this.rotation.setFromAxisAngle(this.zAxis, heading);
+    if(fall)this.rotation.multiply(this.lean.setFromAxisAngle(this.yAxis,fall));
     if (tilt) this.rotation.multiply(this.lean.setFromAxisAngle(this.yAxis, tilt));
     this.matrix.compose(this.position, this.rotation, this.scale); mesh.setMatrixAt(index, this.matrix);
-    if (color !== undefined) mesh.setColorAt(index, this.colour.setHex(color));
+    if (color !== undefined) mesh.setColorAt(index, this.colour.setHex(b&&b.flash>0?0xffeac9:b?.hp===0?0x4a4a43:color));
   }
 
   private trim(x: number, y: number, h: number, lx: number, ly: number, lz: number,
@@ -234,7 +299,7 @@ export class CityPolice {
     this.boxIndex = 0; this.badgeIndex = 0; this.lampIndex = 0;
     let headIndex = 0;
     for (const unit of this.units) {
-      this.baseZ = 0;
+      this.baseZ = 0; this.renderBody=this.damageBodies[unit.id*2];
       const { x, y, heading: h, id } = unit;
       this.place(this.bodies, id, x, y, h, 0, 0, 0, 1, 1, 1, IVORY);
       this.place(this.glass, id, x, y, h, 0, 0, 0, 1, 1, 1);
@@ -242,7 +307,7 @@ export class CityPolice {
       this.trim(x, y, h, 1.29, 0, 0.77, 1.2, 1.65, 0.07, NAVY);
       this.trim(x, y, h, -1.51, 0, 0.73, 0.7, 1.67, 0.075, NAVY);
       this.trim(x, y, h, -0.1, 0, 1.31, 0.35, 1.31, 0.09, RUBBER);
-      const flashing = unit.mode !== 'patrol', phase = Math.floor(this.time * 4) % 2;
+      const flashing = !unit.carDestroyed && unit.mode !== 'patrol', phase = Math.floor(this.time * 4) % 2;
       for (const side of [-1, 1]) {
         this.trim(x, y, h, 0.04, side * 0.717, 0.97, 0.065, 0.04, 0.42, IVORY);
         this.trim(x, y, h, 0.74, side * 0.91, 0.83, 0.2, 0.12, 0.1, NAVY);
@@ -267,7 +332,9 @@ export class CityPolice {
         this.place(this.rims, wheel++, x, y, h, axle, side * 0.864, 0.3, 1, 1, 1, 0xbdb9ac, -unit.wheelPhase);
       }
       const p = unit.officer;
-      if (!p.active) continue;
+      this.renderBody=this.damageBodies[unit.id*2+1];
+      if (!p.active && !unit.officerDestroyed) continue;
+      if(unit.officerDestroyed&&this.renderBody.age>=3)continue;
       const skin = id ? 0xb58160 : 0xe0b58b, swing = p.moving ? Math.sin(p.phase) * 0.55 : 0;
       const px = p.x, py = p.y, ph = p.heading;
       this.baseZ = this.officerFloor(px, py);
@@ -292,7 +359,13 @@ export class CityPolice {
         this.trim(px, py, ph, 0.07, side * 0.21, 1.3, 0.12, 0.07, 0.07, GOLD);
       }
     }
-    this.baseZ = 0; this.renderGarage();
+    this.renderBody=null; this.baseZ = 0; this.renderGarage();
+    this.allGarage.forEach((b,i)=>{
+      this.renderBody=this.damageBodies[4+i];
+      this.place(this.shelter,i,0,0,0,(b.minX+b.maxX)/2,(b.minY+b.maxY)/2,(b.minZ+b.maxZ)/2,
+        b.maxX-b.minX,b.maxY-b.minY,b.maxZ-b.minZ,i===5?0xd4b292:0xdca68d);
+    });this.renderBody=null;this.shelter.instanceMatrix.needsUpdate=true;
+    if(this.shelter.instanceColor)this.shelter.instanceColor.needsUpdate=true;
     this.box.count = this.boxIndex; this.badges.count = this.badgeIndex; this.lamps.count = this.lampIndex; this.heads.count = headIndex;
     for (const mesh of [this.box, this.bodies, this.glass, this.tyres, this.rims, this.heads, this.badges, this.lamps]) {
       mesh.instanceMatrix.needsUpdate = true;
@@ -308,16 +381,22 @@ export class CityPolice {
       this.light(x, y, 0, 0.3, side * 2.15, 0.051, 6.65, 0.07, 0.02, 0x7da58b);
       this.light(x, y, 0, side * 3.02 + 0.3, 0, 0.051, 0.07, 4.3, 0.02, 0x7da58b);
     }
+    if(this.damageBodies[9].hp>0){
     this.trim(x, y, 0, 4.21, 0, 2.78, 0.25, 4.52, 0.34, IVORY);
+    }
     for (const side of [-1, 1]) {
+      if(this.damageBodies[side<0?7:8].hp<=0)continue;
       this.trim(x, y, 0, 4.2, side * 2.09, 1.4, 0.28, 0.18, 2.8, IVORY);
       for (let i = 0; i < 5; i++) this.trim(x, y, 0, 4.36, side * 2.09, 0.2 + i * 0.3, 0.028, 0.17, 0.12, i % 2 ? RUBBER : GOLD);
     }
+    if(this.damageBodies[9].hp>0){
     this.trim(x, y, 0, 4.54, 0, 2.76, 0.025, 1.4, 0.23, 0x456857);
     // House icon, geometric so it stays readable without a texture or font download.
     this.light(x, y, 0, 4.56, 0, 2.79, 0.023, 0.13, 0.11, IVORY);
     this.light(x, y, 0, 4.56, -0.065, 2.84, 0.023, 0.025, 0.12, IVORY);
     this.light(x, y, 0, 4.56, 0.065, 2.84, 0.023, 0.025, 0.12, IVORY);
+    }
+    if(this.damageBodies[4].hp>0){
     // A shallow service bench and cabinet against the back wall, outside safe parking footprint.
     this.trim(x, y, 0, -3.88, 0, 0.52, 0.55, 2.6, 0.98, 0x775949);
     this.trim(x, y, 0, -3.83, 0, 1.04, 0.65, 2.72, 0.1, 0xc4b599);
@@ -329,15 +408,9 @@ export class CityPolice {
     }
     for (let i = 0; i < 3; i++) this.trim(x, y, 0, -3.84, -0.65 + i * 0.65, 1.16, 0.25, 0.27, 0.17, i === 1 ? 0x8ca397 : 0xc99a6e);
     this.trim(x, y, 0, -4.21, 0, 1.85, 0.04, 2.5, 1.35, 0x526154);
-    this.trim(x, y, 0, 0, -3.82, 2.78, 8.3, 0.04, 0.3, IVORY);
-    this.trim(x, y, 0, 0, 3.82, 2.78, 8.3, 0.04, 0.3, IVORY);
+    }
+    if(this.damageBodies[5].hp>0)this.trim(x, y, 0, 0, -3.82, 2.78, 8.3, 0.04, 0.3, IVORY);
+    if(this.damageBodies[6].hp>0)this.trim(x, y, 0, 0, 3.82, 2.78, 8.3, 0.04, 0.3, IVORY);
   }
 
-  private rayBody(origin: ArrayLike<number>, direction: ArrayLike<number>, x: number, y: number, heading: number,
-    halfLength: number, halfWidth: number, minZ: number, maxZ: number, reach: number): number | null {
-    const c = Math.cos(heading), s = Math.sin(heading), dx = origin[0] - x, dy = origin[1] - y;
-    return firstStaticHit([{ minX: -halfLength, maxX: halfLength, minY: -halfWidth, maxY: halfWidth, minZ, maxZ }],
-      [dx * c + dy * s, -dx * s + dy * c, origin[2]],
-      [direction[0] * c + direction[1] * s, -direction[0] * s + direction[1] * c, direction[2]], reach);
-  }
 }

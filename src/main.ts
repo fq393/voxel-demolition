@@ -20,6 +20,10 @@ import { GARAGE, inGarage } from './police-types.ts';
 import { WantedState, type Crime } from './wanted-state.ts';
 import { WantedUI } from './wanted-ui.ts';
 import { warehouseBreachOpen } from './escape-world.ts';
+import { DestructibleSkyline } from './destructible-skyline.ts';
+import type { DamageTarget, WorldDamageRequest, WorldDamageEvent } from './world-damage-types.ts';
+import { loadExpandedDamage, saveExpandedDamage, type ExpandedDamageSnapshot } from './world-damage-save.ts';
+import { rayOwnedCar } from './world-hit.ts';
 import { CITY_CAR_SPAWNS, findVehicleExit, playerOverlapsCar, safeExitSpeed } from './city-driving.ts';
 import { collectSkylineColliders, firstStaticHit, overlapsPlayer, overlapsVehicle, type StaticBox } from './city-colliders.ts';
 import { Particles } from './particles.ts';
@@ -208,7 +212,7 @@ const mission = SCENE === 'city' ? new DemolitionMission({
     void playerBoard.finishRun(mission?.snapshot.count ?? 0);
   },
   onModeChange: (mode) => {
-    if (ready && worldMode === 'sandbox') saveWorldDamage();
+    if (ready && worldMode === 'sandbox') { saveWorldDamage(); saveExpandedWorld(); }
     worldMode = mode;
     cityJobs?.setEligible(mode === 'sandbox');
     wanted.setEligible(mode === 'sandbox');
@@ -648,13 +652,18 @@ let cityBuildings: StaticBox[] = [];
 let cityAmbience: CityAmbience | null = null;
 let cityLife: CityLife | null = null;
 let cityPolice: CityPolice | null = null;
+let citySkyline: DestructibleSkyline | null = null;
+let expandedDirty = false;
+let expandedSaveOK = true;
+let garageRevision = -1;
+let skylineRevision = -1;
 let streetDetails: StreetDetails | null = null;
 let urbanProps: UrbanPropRenderer | null = null;
 let urbanChain: UrbanChain | null = null;
 let blastDetails: BlastDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
-player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x, y, z, height)) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
+player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!citySkyline?.blocksPlayer(x,y,z,height) || !!cityLife?.blocksPlayer(x, y, z, height) || (worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x, y, z, height)) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
 touch?.setFlying(player.flying);
 if (touch) {
   player.flySpeed = TOUCH_FLY_SPEED;
@@ -670,14 +679,21 @@ const dustTint: Record<number, THREE.Color> = {
 const concreteDust = new THREE.Color(0.62, 0.6, 0.56);
 
 /** Static perimeter buildings stop rays; the centre remains the destructible voxel world. */
-function castWorld(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): ReturnType<typeof raycast> {
-  const sceneryHit = firstStaticHit(cityStatic, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
-  const trafficHit = cityLife?.rayHit(origin, direction, sceneryHit ?? reach) ?? null;
-  const policeHit = worldMode === 'sandbox' ? cityPolice?.rayHit(origin, direction, trafficHit ?? sceneryHit ?? reach) ?? null : null;
-  const staticHit = policeHit ?? trafficHit ?? sceneryHit;
-  const hit = raycast(city, origin, direction, staticHit ?? reach);
-  if (hit) return hit;
-  return staticHit === null ? null : { t: staticHit, voxel: -1, normal: [-direction[0], -direction[1], -direction[2]] };
+type WorldHit = NonNullable<ReturnType<typeof raycast>> & { damage?: DamageTarget };
+function castWorld(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): WorldHit | null {
+  const scenery = firstStaticHit(cityStatic,[origin[0],origin[1],origin[2]],[direction[0],direction[1],direction[2]],reach);
+  let entity: DamageTarget | null = null;
+  for (const hit of [citySkyline?.rayHit(origin,direction,reach),cityLife?.damageRay(origin,direction,reach),
+    worldMode==='sandbox'?cityPolice?.damageRay(origin,direction,reach):null,
+    car&&!driving?rayOwnedCar(origin,direction,reach,{x:car.position.x,y:car.position.y,heading:car.heading,size:car.size}):null]) {
+    if(hit&&(!entity||hit.t<entity.t))entity=hit;
+  }
+  const nearest = Math.min(scenery??reach,entity?.t??reach);
+  const voxel = raycast(city,origin,direction,nearest);
+  if(voxel && (!entity || voxel.t < entity.t - .001))return voxel;
+  if(entity && (scenery===null || entity.t<=scenery+.001))return{t:entity.t,voxel:-1,normal:entity.normal,damage:entity};
+  if(voxel)return voxel;
+  return scenery===null?null:{t:scenery,voxel:-1,normal:[-direction[0],-direction[1],-direction[2]]};
 }
 
 /** Start on the pavement off the tower's rounded corner, looking up at it: the shopfront and the blade sign in view, the tower rising overhead. */
@@ -744,19 +760,23 @@ async function start(): Promise<void> {
   else {
     view.setStreets(city);
     const surrounding = skyline(city) as THREE.InstancedMesh;
-    view.scene.add(surrounding);
     cityBuildings = collectSkylineColliders(surrounding);
+    citySkyline = new DestructibleSkyline(surrounding);
+    view.scene.add(citySkyline.object);
     cityAmbience = new CityAmbience(cityBuildings);
-    cityStatic = [...cityBuildings, ...cityAmbience.colliders];
+    cityStatic = [...cityAmbience.colliders];
     view.scene.add(cityAmbience.object);
     cityPolice = new CityPolice(city, cityStatic);
     cityStatic = [...cityStatic, ...cityPolice.colliders];
     view.scene.add(cityPolice.object);
     cityLife = new CityLife(city, cityStatic);
-    cityLife.extraCarBlocked = (x,y,h) => worldMode === 'sandbox' && !!cityPolice?.blocksCar(x,y,h,[4.3,1.84,1.36]);
-    cityLife.extraPedestrianBlocked = (x,y) => worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x,y,0,1.8);
+    cityLife.extraCarBlocked = (x,y,h) => !!citySkyline?.blocksCar(x,y,h,[4.3,1.84,1.36]) || (worldMode === 'sandbox' && !!cityPolice?.blocksCar(x,y,h,[4.3,1.84,1.36]));
+    cityLife.extraPedestrianBlocked = (x,y) => !!citySkyline?.blocksPlayer(x,y,0,1.8) || (worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x,y,0,1.8));
+    cityPolice.extraCarBlocked = (x,y,h) => !!citySkyline?.blocksCar(x,y,h,[4.3,1.84,1.36]);
+    cityPolice.extraOfficerBlocked = (x,y) => !!citySkyline?.blocksPlayer(x,y,.25,1.8);
+    cityPolice.extraRayHit = (from,direction,reach) => citySkyline?.rayHit(from,direction,reach)?.t ?? null;
     view.scene.add(cityLife.object);
-    cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
+    cityGuide?.setLandmarks([...(citySkyline?.activeBounds??cityBuildings),...(city.district??[]).map(b=>b.bounds)]);
     districtSigns = new DistrictSigns(city);
     view.scene.add(districtSigns.object);
     streetDetails = new StreetDetails(city);
@@ -838,6 +858,7 @@ async function start(): Promise<void> {
     urbanProps?.reset(city);
     urbanChain?.reset(city);
     cityJobs?.reset(city);
+    restoreExpandedWorld();
     restoreCityPose();
   }
 
@@ -923,6 +944,7 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
   alarms.clear();
   for (const r of rockets.splice(0)) view.scene.remove(r.mesh);
   pending.length = charges.length = blows.length = crushes.length = 0;
+  activeBalls.clear();
   chips.clear();
   shards.clear();
   smoke?.clear();
@@ -954,18 +976,23 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
       const result=clearDamage(damageStorage,playerBoard.profile.playerId,city);damageSerialized='';cityJobs?.setDamageSaveStatus(result.ok,result.error);
     }
     districtSigns?.reset(city);
-    cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
+    cityGuide?.setLandmarks([...(citySkyline?.activeBounds??cityBuildings),...(city.district??[]).map(b=>b.bounds)]);
   }
   streetDetails?.reset(city);
   urbanProps?.reset(city);
   urbanChain?.reset(city);
   wanted.reset();
-  cityPolice?.reset(city, [...cityBuildings, ...(cityAmbience?.colliders ?? [])]);
-  cityStatic = [...cityBuildings, ...(cityAmbience?.colliders ?? []), ...(worldMode === 'sandbox' ? cityPolice?.colliders ?? [] : [])];
+  citySkyline?.reset();
+  cityPolice?.reset(city, cityAmbience?.colliders ?? []);
+  cityStatic = [...(cityAmbience?.colliders ?? []), ...(worldMode === 'sandbox' ? cityPolice?.colliders ?? [] : [])];
   if (cityPolice) cityPolice.object.visible = worldMode === 'sandbox';
   cityJobs?.setPoliceLock(false);
   cityLife?.reset(city, cityStatic);
   cityJobs?.reset(city);
+  garageRevision=-1;skylineRevision=-1;
+  if(options.restore)restoreExpandedWorld();
+  else {expandedDirty=true;if(options.repair&&worldMode==='sandbox')persistExpandedWorld();syncExpandedColliders();}
+  citySkyline?.update(0);if(citySkyline)cityAmbience?.updateDestruction(citySkyline);
   spawn();
   if (car) {
     placeCar();
@@ -992,7 +1019,7 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
 /** The car back on the grid, at rest, with its body in the (new) solver. */
 function placeCar(): boolean {
   if (!car) return false;
-  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h, car!.size).length && !overlapsVehicle(cityStatic, x, y, h, car!.size[0] / 2, car!.size[1] / 2, CLEARANCE+car!.size[2]) && !cityLife?.blocksCar(x, y, h, car!.size) && !(worldMode === 'sandbox' && cityPolice?.blocksCar(x,y,h,car!.size)) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h, car!.size)) : null;
+  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h, car!.size).length && !citySkyline?.blocksCar(x,y,h,car!.size) && !overlapsVehicle(cityStatic, x, y, h, car!.size[0] / 2, car!.size[1] / 2, CLEARANCE+car!.size[2]) && !cityLife?.blocksCar(x, y, h, car!.size) && !(worldMode === 'sandbox' && cityPolice?.blocksCar(x,y,h,car!.size)) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h, car!.size)) : null;
   if (SCENE === 'city' && !parking) { hud.toast('停车位被堵住了，按 R 重建街区后再试'); return false; }
   if (SCENE !== 'city' && !line) return false;
   const { position, heading } = parking ? { position: [parking[0], parking[1]], heading: parking[2] } : gridSlot(line!);
@@ -1032,6 +1059,7 @@ function saveWorldDamage():void {
 function saveCityPose(): void {
   if (!ready || rebuilding || !car || !cityJobs || mission?.snapshot.mode !== 'sandbox') return;
   saveWorldDamage();
+  saveExpandedWorld();
   cityJobs.savePose({player:{x:player.position.x,y:player.position.y,z:player.position.z,yaw:player.yaw,driving},car:{x:car.position.x,y:car.position.y,z:0,yaw:car.heading,health:car.health}});
 }
 
@@ -1041,6 +1069,7 @@ function restoreCityPose(): void {
   if (!pose) return;
   const {car:saved,player:walker} = pose;
   const validCar = !sweep(city,saved.x,saved.y,saved.yaw,car.size).length
+    && !citySkyline?.blocksCar(saved.x,saved.y,saved.yaw,car.size)
     && !overlapsVehicle(cityStatic,saved.x,saved.y,saved.yaw,car.size[0]/2,car.size[1]/2,CLEARANCE+car.size[2])
     && !cityLife?.blocksCar(saved.x,saved.y,saved.yaw,car.size) && !(worldMode === 'sandbox' && cityPolice?.blocksCar(saved.x,saved.y,saved.yaw,car.size));
   if (validCar) {
@@ -1060,7 +1089,7 @@ function changeCityVehicle(id:VehicleId):boolean {
   if (!ready || rebuilding || !car || mission?.snapshot.mode !== 'sandbox' || wanted.stars > 0) return false;
   const spec=vehicleSpec(id);
   let garageExit:[number,number,number]|null=null;
-  const parking=CITY_CAR_SPAWNS.find(([x,y,h])=>!sweep(city,x,y,h,spec.size).length
+  const parking=CITY_CAR_SPAWNS.find(([x,y,h])=>!sweep(city,x,y,h,spec.size).length && !citySkyline?.blocksCar(x,y,h,spec.size)
     && !overlapsVehicle(cityStatic,x,y,h,spec.size[0]/2,spec.size[1]/2,CLEARANCE+spec.size[2])
     && !cityLife?.blocksCar(x,y,h,spec.size) && !cityPolice?.blocksCar(x,y,h,spec.size)
     && (driving ? !!(garageExit=findVehicleExit(x,y,h,(px,py,pz)=>player.blocked(px,py,pz,1.8)
@@ -1084,6 +1113,52 @@ function recallCar(): void {
   if (placeCar()) hud.toast('车已回到街边停车位 · 跟着小地图找它');
 }
 
+function syncExpandedColliders(): void {
+  if(!cityPolice)return;
+  if(garageRevision!==cityPolice.colliderRevision){
+    garageRevision=cityPolice.colliderRevision;
+    cityStatic=[...(cityAmbience?.colliders??[]),...(worldMode==='sandbox'?cityPolice.colliders:[])];
+    cityLife?.setStaticBoxes(cityStatic);cityPolice.setStaticBoxes(cityAmbience?.colliders??[]);
+  }
+  if(citySkyline && skylineRevision!==citySkyline.revision){skylineRevision=citySkyline.revision;cityGuide?.setLandmarks([...citySkyline.activeBounds,...(city.district??[]).map(b=>b.bounds)]);}
+}
+function expandedSnapshot():ExpandedDamageSnapshot|null {
+  return citySkyline&&cityLife&&cityPolice?{version:1,skyline:citySkyline.snapshot(),life:cityLife.snapshotDamage(),police:cityPolice.snapshotDamage()}:null;
+}
+function persistExpandedWorld():void {
+  const data=expandedSnapshot();if(!data||worldMode!=='sandbox')return;
+  const result=saveExpandedDamage(damageStorage,playerBoard.profile.playerId,data);expandedSaveOK=result.ok;
+  if(result.ok)expandedDirty=false;else{cityJobs?.setDamageSaveStatus(false,result.error);hud.toast(result.error??'破坏存档未成功');}
+}
+function saveExpandedWorld():void {if(SCENE==='city'&&ready&&!rebuilding&&expandedDirty&&worldMode==='sandbox')persistExpandedWorld();}
+function restoreExpandedWorld():void {
+  if(!citySkyline||!cityLife||!cityPolice||worldMode!=='sandbox')return;
+  const loaded=loadExpandedDamage(damageStorage,playerBoard.profile.playerId);expandedSaveOK=loaded.status!=='unavailable';
+  const pristine=expandedSnapshot()!;
+  if(loaded.data && (!citySkyline.restore(loaded.data.skyline)||!cityLife.restoreDamage(loaded.data.life)||!cityPolice.restoreDamage(loaded.data.police))){
+    citySkyline.restore(pristine.skyline);cityLife.restoreDamage(pristine.life);cityPolice.restoreDamage(pristine.police);
+    hud.toast('人物与外围楼体存档格式异常，已恢复；原金币和体素破洞保留');
+  }
+  expandedDirty=false;garageRevision=skylineRevision=-1;syncExpandedColliders();citySkyline.update(0);cityAmbience?.updateDestruction(citySkyline);
+}
+function applyExpandedDamage(request:WorldDamageRequest):WorldDamageEvent[] {
+  if(SCENE!=='city'||!ready||rebuilding||!playing||document.hidden)return[];
+  const id=request.directId,events:WorldDamageEvent[]=[];
+  if(!id||id.startsWith('skyline:'))events.push(...citySkyline?.damage(request)??[]);
+  if(!id||id.startsWith('life-'))events.push(...cityLife?.damage(request)??[]);
+  if(worldMode==='sandbox'&&(!id||id.startsWith('police-')||id.startsWith('garage:')))events.push(...cityPolice?.damage(request)??[]);
+  if(id==='owned-car'&&car)hurtCar(request.amount/150,new THREE.Vector3(...request.at));
+  if(events.length){
+    expandedDirty=true;syncExpandedColliders();
+    if(events.some(e=>e.kind==='person'))reportCrime('assault');
+    else reportCrime('damage');
+    for(const e of events.slice(0,8)){
+      if(e.destroyed){effects.dust(e.at,.8,new THREE.Color(e.tint));if(e.kind==='vehicle')blastDetails?.burst(e.at,1.3,{fuel:false,tint:e.tint});}
+    }
+  }
+  return events;
+}
+
 function reportCrime(kind: Crime): void {
   if (SCENE !== 'city' || !ready || rebuilding || !playing || document.hidden || worldMode !== 'sandbox') return;
   wanted.report(kind, [player.position.x,player.position.y,player.position.z]);
@@ -1102,7 +1177,7 @@ function updatePolice(dt: number): void {
   const previous = cityJobs.progressState.escape.active?.stage;
   cityJobs.updateEscape({dt,player:{x:position[0],y:position[1],z:position[2],driving,flying:player.flying,grounded:driving || player.onGround},wantedStars:wanted.stars,breachOpen:previous===1 && warehouseBreachOpen(city),safe});
   if (previous === 0 && cityJobs.progressState.escape.active?.stage === 1) { reportCrime('mission'); cityJobs.setPoliceLock(true); }
-  sounds.policeSiren(wanted.stars > 0 && !safe, Math.min(...cityPolice.units.map(u=>Math.hypot(u.x-position[0],u.y-position[1]))));
+  sounds.policeSiren(wanted.stars > 0 && !safe, Math.min(...cityPolice.units.filter(u=>!u.carDestroyed&&!u.officerDestroyed).map(u=>Math.hypot(u.x-position[0],u.y-position[1]))));
   if (response.caught) {
     if (driving) setDriving(false,true);
     wanted.reset(); cityJobs.cancelEscape(); cityJobs.setPoliceLock(false);
@@ -1114,7 +1189,7 @@ function updatePolice(dt: number): void {
 
 function updateCityGuide(): void {
   if (!cityGuide || !car) return;
-  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed, target: cityJobs?.state.target ?? null, traffic: cityLife?.state.cars, pedestrians: cityLife?.state.pedestrians, police: worldMode === 'sandbox' ? cityPolice?.units : [], garage: worldMode === 'sandbox' ? [GARAGE.center[0],GARAGE.center[1]] : undefined });
+  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed, target: cityJobs?.state.target ?? null, traffic: cityLife?.state.cars, pedestrians: cityLife?.state.pedestrians, police: worldMode === 'sandbox' ? cityPolice?.units.filter(u=>!u.carDestroyed) : [], garage: worldMode === 'sandbox' ? [GARAGE.center[0],GARAGE.center[1]] : undefined });
 }
 
 /** The car's controls: keys and the thumb stick (throttle up, steer across), or coasting to a stop with no one in it. */
@@ -1154,6 +1229,16 @@ function driveStep(dt: number): void {
   let inside = sweep(city, c.position.x, c.position.y, c.heading, c.size).length;
   for (let k = 0; k < parts; k++) {
     c.step(dt / parts, d);
+    const speed = c.velocity.length();
+    const actorsBlocked = !!cityLife?.blocksCar(c.position.x,c.position.y,c.heading,c.size) || (worldMode==='sandbox' && !!cityPolice?.blocksCar(c.position.x,c.position.y,c.heading,c.size));
+    const exteriorBlocked = !!citySkyline?.blocksCar(c.position.x,c.position.y,c.heading,c.size);
+    if((actorsBlocked || exteriorBlocked) && speed>3) {
+      const axis=c.velocity.clone().normalize(),at=c.position.clone().addScaledVector(new THREE.Vector3(axis.x,axis.y,0),c.size[0]/2).setZ(.75);
+      applyExpandedDamage({at:at.toArray() as [number,number,number],radius:Math.max(1.1,c.size[1]*.65),amount:speed*14,impulse:speed*.5,kind:'impact'});
+      reportCrime('crash');hurtCar(Math.max(0,speed-5)*.012,at);
+      if(carTeleported)break;
+    }
+    if(citySkyline?.blocksCar(c.position.x,c.position.y,c.heading,c.size)) {c.undo(.2);break;}
     if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading, c.size) || (worldMode === 'sandbox' && cityPolice?.blocksCar(c.position.x,c.position.y,c.heading,c.size))) {
       const speed = c.velocity.length();
       if (speed > 2) { reportCrime('crash'); sounds.hammer(2); shake = Math.max(shake, Math.min(0.4, speed / 30)); }
@@ -1811,9 +1896,9 @@ function useTool(): void {
     rifleTraces.fire(hand.muzzle(new THREE.Vector3(), RIFLE), at);
     sounds.gun(1);
     shake = Math.max(shake, 0.035);
-    if (hit && hit.voxel >= 0) {
+    if (hit && (hit.voxel >= 0 || hit.damage)) {
       at.addScaledVector(new THREE.Vector3(...hit.normal), -0.10);
-      detonate(at, t, hit.t, hit.normal);
+      detonate(at, t, hit.t, hit.normal, hit.damage?.id);
     } else if (hit) impacts.hit(at.toArray(), hit.normal, 0.16, 0.12, hotRing, 0.02);
     player.pitch = Math.min(1.5, player.pitch + 0.0025);
     return;
@@ -1822,7 +1907,8 @@ function useTool(): void {
     const [r, density, speed] = t.ball;
     const from = eye.clone().addScaledVector(dir, 2.2);
     const v = dir.clone().multiplyScalar(speed).add(player.velocity);
-    physics.throwBall(from.toArray(), v.toArray(), r, density);
+    const slot = physics.throwBall(from.toArray(), v.toArray(), r, density);
+    activeBalls.set(slot, { previous: from.clone(), radius: r, expires: simTime + 4, hits: new Map() });
     planBall(from, v, r);
     shake = Math.max(shake, 0.35);
     sounds.swing();
@@ -1875,9 +1961,9 @@ function land(): void {
   player.eye(eye);
   player.look(dir);
   const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
-  if (!hit || hit.voxel < 0) return;
+  if (!hit || (hit.voxel < 0 && !hit.damage)) return;
   const at = eye.clone().addScaledVector(dir, hit.t).addScaledVector(new THREE.Vector3(...hit.normal), -Math.min(0.5, t.radius * 0.3));
-  detonate(at, t, hit.t, hit.normal);
+  detonate(at, t, hit.t, hit.normal, hit.damage?.id);
 }
 
 /** The most the laser burns through in one tick (m): whatever it hits, out the far side. */
@@ -1911,7 +1997,9 @@ function burn(t: ToolSpec): void {
   const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
   const from = lastBeam;
   lastBeam = dir.clone();
-  if (!hit || hit.voxel < 0) return;
+  if (!hit) return;
+  if(hit.damage){const at=eye.clone().addScaledVector(dir,hit.t).addScaledVector(new THREE.Vector3(...hit.normal),-.02);applyExpandedDamage({at:at.toArray() as [number,number,number],radius:.34,amount:30,impulse:0,kind:'laser',directId:hit.damage.id});effects.sparks(at.toArray(),4,3);return;}
+  if(hit.voxel<0)return;
   const way = Math.hypot(dir.x, dir.y) > 0.2 ? [dir.x / Math.hypot(dir.x, dir.y), dir.y / Math.hypot(dir.x, dir.y)] : undefined;
   // Beams across the sweep, close enough at the range it burns that their slots join
   const step = t.radius * 1.4;
@@ -2009,6 +2097,8 @@ function wreck(at: THREE.Vector3): void {
 
 /** Blasts due at a time (of the world's clock): where a thrown ball will smash through what it meets. */
 const pending: { time: number; at: THREE.Vector3; radius: number; push: number }[] = [];
+/** Actual GPU ball poses, bounded by the solver's reusable spare slots. */
+const activeBalls = new Map<number, { previous: THREE.Vector3; radius: number; expires: number; hits: Map<string, number> }>();
 /**
  * The world's clock (s) and how fast it runs: the player moves in real time either way, so
  * in slow motion they can fly round a collapse as it happens.
@@ -2030,7 +2120,7 @@ function planBall(from: THREE.Vector3, v: THREE.Vector3, r: number): void {
   for (let t = 0; t < 4 && vel.length() > 10; t += dt) {
     if (!city.weightless) vel.z -= 9.81 * dt;
     const step = vel.clone().multiplyScalar(dt);
-    const hit = castWorld(p.toArray(), step.clone().normalize().toArray(), step.length() + r);
+    const hit = raycast(city, p.toArray(), step.clone().normalize().toArray(), step.length() + r);
     p.add(step);
     if (!hit || hit.voxel < 0) continue;
     pending.push({ time: now + t - 0.03, at: p.clone().addScaledVector(vel.clone().normalize(), r), radius: r * 1.7, push: vel.length() * 0.35 });
@@ -2058,20 +2148,23 @@ function rocketMesh(scale = 1): THREE.Object3D {
 function flyRockets(dt: number): void {
   for (let k = rockets.length - 1; k >= 0; k--) {
     const r = rockets[k];
+    const was = r.from.clone().lerp(r.to,Math.min(1,r.t/r.time));
     r.t += dt;
     const f = Math.min(1, r.t / r.time);
-    const was = r.mesh.position.clone();
     r.mesh.position.lerpVectors(r.from, r.to, f);
     r.mesh.lookAt(r.from);
     if (!r.quiet) effects.impact(r.mesh.position.toArray(), 3, smokeTint);
     // A satellite in its way (they move, so it's looked for as the rocket flies): it goes off there
     const step = r.mesh.position.clone().sub(was);
     const flown = step.length();
-    const sat = !r.quiet && flown > 0 ? satellites?.hit(was, step.divideScalar(flown), flown) : null;
-    if (sat) r.to.copy(was).addScaledVector(step, sat.distance);
-    if (f >= 1 || sat) {
+    const direction=flown>0?step.clone().divideScalar(flown):new THREE.Vector3();
+    const worldHit = SCENE==='city'&&flown>0?castWorld(was.toArray(),direction.toArray(),flown):null;
+    const sat = !r.quiet && flown > 0 ? satellites?.hit(was, direction, flown) : null;
+    if(worldHit)r.to.copy(was).addScaledVector(direction,worldHit.t);
+    if (sat) r.to.copy(was).addScaledVector(direction, sat.distance);
+    if (f >= 1 || sat || worldHit) {
       view.scene.remove(r.mesh);
-      if (r.spec !== null || sat) detonate(r.to, r.spec ?? TOOLS[2], player.position.distanceTo(r.to));
+      if (r.spec !== null || sat || worldHit) detonate(r.to, r.quiet ? BULLET : r.spec ?? TOOLS[2], player.position.distanceTo(r.to),worldHit?.normal,worldHit?.damage?.id);
       rockets.splice(k, 1);
     }
   }
@@ -2102,7 +2195,8 @@ function flyRockets(dt: number): void {
 const smokeTint = new THREE.Color(0.5, 0.5, 0.5);
 
 /** Tool `t`'s blast at `at`, `distance` m from the player: the damage, and its sound, flash, dust. */
-function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: ArrayLike<number>): void {
+function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: ArrayLike<number>, directId?: string): void {
+  applyExpandedDamage({at:at.toArray() as [number,number,number],radius:t.radius,amount:t.explosive?180:t.rifle||t.name==='Machine gun'?25:t.name==='Hammer'?50:40,impulse:t.push,kind:t.explosive?'explosion':t.rifle||t.name==='Machine gun'?'bullet':t.name==='Hammer'?'hammer':'impact',directId:!t.explosive?directId:undefined});
   cityLife?.scare(at.x, at.y, t.radius + 8);
   satellites?.blast(at, t.radius);
   // The car caught in it (its own rockets too, fired too close)
@@ -2193,14 +2287,33 @@ const SETTLE_WATCH = 2.5;
 let lastImpact = new Float32Array(0);
 let frames = 0;
 async function readDebris(): Promise<void> {
-  if (reading || (physics.loose === 0 && physics.rubble.size === 0)) return;
+  if (reading || (physics.loose === 0 && physics.rubble.size === 0 && activeBalls.size === 0)) return;
   reading = true;
   try {
     const counters = await physics.solver.readCounters();
     if (rebuilding || screenshotPaused || (ready && (!playing || document.hidden))) return;
     physics.solver.adapt(counters);
-    const { voxels, data, sections, sectionData } = await physics.readLoose();
+    for (const [slot, ball] of activeBalls) if (ball.expires < simTime) activeBalls.delete(slot);
+    const ballSlots = [...activeBalls.keys()];
+    const ballFlights = ballSlots.map(slot => activeBalls.get(slot)!);
+    const { voxels, data, sections, sectionData, spareData } = await physics.readLoose(ballSlots);
     if (rebuilding || screenshotPaused || (ready && (!playing || document.hidden))) return;
+    for (let k = 0; k < ballSlots.length; k++) {
+      const ball = ballFlights[k];
+      if (activeBalls.get(ballSlots[k]) !== ball) continue; // Slot reused while awaiting GPU.
+      const at = new THREE.Vector3().fromArray(spareData, k * 12);
+      const velocity = new THREE.Vector3().fromArray(spareData, k * 12 + 4);
+      const step = at.clone().sub(ball.previous), distance = step.length(), speed = velocity.length();
+      if (distance > 0.001 && speed > 5) {
+        const hit = castWorld(ball.previous.toArray(), step.divideScalar(distance).toArray(), distance + ball.radius);
+        if (hit?.damage && simTime - (ball.hits.get(hit.damage.id) ?? -Infinity) > 0.25) {
+          const contact = ball.previous.clone().addScaledVector(step, hit.t);
+          applyExpandedDamage({ at: contact.toArray() as [number, number, number], radius: ball.radius * 1.7, amount: Math.max(40, speed * 1.4), impulse: speed * 0.35, kind: 'impact', directId: hit.damage.id });
+          ball.hits.set(hit.damage.id, simTime);
+        }
+      }
+      ball.previous.copy(at);
+    }
     const out: number[] = [];
     const { x, y } = player.position;
     const now = performance.now() / 1000;
@@ -2586,6 +2699,9 @@ function tick(now: number): void {
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
   streetDetails?.update(city.state);
   urbanProps?.update(city);
+  citySkyline?.update(sim);
+  if(citySkyline)cityAmbience?.updateDestruction(citySkyline);
+  syncExpandedColliders();
   updatePolice(sim);
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
@@ -2672,11 +2788,14 @@ if (testing) Object.assign(window, {
     get rifle() { return rifleMagazine; },
     get jobs() { return cityJobs; },
     get police() { return cityPolice; },
+    get skyline() { return citySkyline; },
+    get expandedSaveOK() { return expandedSaveOK; },
     get wanted() { return wanted; },
     get life() { return cityLife; },
     get ambience() { return cityAmbience; },
     get district() { return city.district; },
     saveDamage:saveWorldDamage,
+    ray:castWorld,
     get staticColliders() { return cityStatic; },
     get freeLook() { return freeLook; },
     playerBoard,
@@ -2712,6 +2831,8 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       rifle: { ...rifleMagazine.diagnostics, traces: rifleTraces.diagnostics },
       staticBuildings: cityBuildings.length,
       ambience: cityAmbience?.diagnostics ?? null,
+      skyline: citySkyline?.diagnostics ?? null,
+      expandedSaveOK,
       police: cityPolice?.diagnostics ?? null,
       wanted: wanted.diagnostics,
       cityLife: cityLife?.diagnostics ?? null,
@@ -2731,6 +2852,7 @@ addEventListener('pagehide', () => {
   car?.dispose();
   cityLife?.dispose();
   cityPolice?.dispose();
+  citySkyline?.dispose();
   wantedUI?.dispose();
   sounds.disposePoliceSiren();
   cityAmbience?.dispose();

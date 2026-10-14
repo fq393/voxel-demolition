@@ -112,8 +112,8 @@ export class CityGuide {
     const mapGroup = element('div', 'cg-map-group');
     const heading = element('div', 'cg-heading'); heading.append(element('span', '', '城市导航'), element('span', 'cg-north', '北 ↑'));
     const legend = element('div', 'cg-legend'); legend.append(element('span', 'cg-legend-player', '▲ 你'), element('span', 'cg-legend-car', '▰ 车'), element('span', 'cg-legend-building', '■ 楼体'));
-    this.canvas.setAttribute('role', 'img'); this.canvas.setAttribute('aria-label', '北朝上的城市示意图：中央暖色主楼可拆，外围灰色建筑实心，黄色箭头为你，青色矩形为车辆');
-    mapGroup.append(heading, this.canvas, legend, element('small', 'cg-map-note', '主楼可拆 · 外围实心'));
+    this.canvas.setAttribute('role', 'img'); this.canvas.setAttribute('aria-label', '北朝上的城市示意图：全城楼体可拆，红蓝矩形为警车，绿屋为安全车库，黄色箭头为你，青色矩形为车辆');
+    mapGroup.append(heading, this.canvas, legend, element('small', 'cg-map-note', '全城可拆 · 绿屋避风头'));
     const controls = element('div', 'cg-control-group'); const actions = element('div', 'cg-actions');
     this.toggle.type = 'button'; this.recall.type = 'button';
     this.toggle.addEventListener('click', (event) => { event.stopPropagation(); this.toggle.blur(); if (this.active && (this.driving || this.canEnter)) this.options.onToggleVehicle(); });

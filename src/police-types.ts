@@ -20,6 +20,7 @@ export interface OfficerState {
 export interface PoliceUnit {
   id: number; x: number; y: number; heading: number; speed: number; wheelPhase: number;
   mode: 'patrol' | 'chase' | 'search'; officer: OfficerState;
+  carDestroyed: boolean; officerDestroyed: boolean;
 }
 export interface PoliceProbes {
   carBlocked(x: number, y: number, heading: number): boolean;

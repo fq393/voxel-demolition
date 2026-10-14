@@ -662,11 +662,11 @@ export class CityPhysics {
    * (xyzw), velocity (xyzw) and rotation (quaternion), gathered on the GPU so only they are
    * read back.
    */
-  async readLoose(): Promise<{ voxels: number[]; data: Float32Array; sections: number[]; sectionData: Float32Array }> {
+  async readLoose(spares: readonly number[] = []): Promise<{ voxels: number[]; data: Float32Array; sections: number[]; sectionData: Float32Array; spareData: Float32Array }> {
     const voxels = this.looseList.filter((v) => this.city.state[v] === State.Loose);
     const sections = [...this.sections.keys()];
-    const n = voxels.length + sections.length;
-    if (!n) return { voxels, data: new Float32Array(0), sections, sectionData: new Float32Array(0) };
+    const n = voxels.length + sections.length + spares.length;
+    if (!n) return { voxels, data: new Float32Array(0), sections, sectionData: new Float32Array(0), spareData: new Float32Array(0) };
     const d = this.device;
     let g = this.gather;
     if (!g || g.capacity < n) {
@@ -685,7 +685,7 @@ export class CityPhysics {
       });
       g = this.gather = { pipe, which, out, staging, count, capacity, group };
     }
-    d.queue.writeBuffer(g.which, 0, Uint32Array.from([...voxels.map((v) => this.body[v]), ...sections]));
+    d.queue.writeBuffer(g.which, 0, Uint32Array.from([...voxels.map((v) => this.body[v]), ...sections, ...spares]));
     d.queue.writeBuffer(g.count, 0, new Uint32Array([n, 0, 0, 0]));
     const encoder = d.createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -698,7 +698,8 @@ export class CityPhysics {
     await g.staging.mapAsync(GPUMapMode.READ, 0, n * 48);
     const all = new Float32Array(g.staging.getMappedRange(0, n * 48).slice(0));
     g.staging.unmap();
-    return { voxels, data: all.subarray(0, voxels.length * 12), sections, sectionData: all.subarray(voxels.length * 12) };
+    const sectionEnd = (voxels.length + sections.length) * 12;
+    return { voxels, data: all.subarray(0, voxels.length * 12), sections, sectionData: all.subarray(voxels.length * 12, sectionEnd), spareData: all.subarray(sectionEnd) };
   }
 
   /**

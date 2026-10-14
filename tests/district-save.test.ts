@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { captureDamage, clearDamage, damagedVoxels, damageLayout, districtDamageKey, loadDamage, MAX_DAMAGE_TEXT,
   MAX_DAMAGE_VOXELS, saveDamage, type DamageSnapshot } from '../src/district-save.ts';
 import type { ProgressStorage } from '../src/city-progress.ts';
-import { Mat, State, worldBuilder, type City } from '../src/world.ts';
+import { buildCity, Mat, State, worldBuilder, type City } from '../src/world.ts';
 
 const storage = (): ProgressStorage & { values: Map<string, string> } => {
   const values = new Map<string, string>();
@@ -85,4 +85,44 @@ test('storage failure is explicit and leaves current damage untouched', () => {
   assert.equal(loadDamage(blocked, 'alice', city).status, 'unavailable');
   const failed = saveDamage(blocked, 'alice', captureDamage(city)); assert.equal(failed.ok, false); assert.ok(failed.error);
   assert.equal(clearDamage(blocked, 'alice', city).ok, false); assert.equal(city.state[0], State.Gone);
+});
+
+/** Released v0.5 geometry fingerprint, verified against its 0b9fc43 source. */
+function legacyDistrict(city: City): City {
+  const count = 118615;
+  return { ...city, count, position: city.position.subarray(0, count * 3), material: city.material.subarray(0, count),
+    building: city.building.subarray(0, count), cell: city.cell.subarray(0, count), buildings: city.buildings.slice(0, 49) };
+}
+test('released v0.5 holes migrate only into the identical complete object prefix', () => {
+  const city = buildCity(7), old = legacyDistrict(city), db = storage();
+  assert.equal(damageLayout(old), 'd1-2jiv-d83df7be-6f4e9878');
+  old.state[118600] = State.Gone;
+  const snapshot = captureDamage(old);
+  saveDamage(db, 'legacy', snapshot);
+  const current = buildCity(7), loaded = loadDamage(db, 'legacy', current);
+  assert.equal(loaded.status, 'migrated');
+  assert.equal(loaded.snapshot.count, current.count);
+  assert.equal(loaded.snapshot.layout, damageLayout(current));
+  assert.deepEqual(damagedVoxels(loaded.snapshot), [118600]);
+  assert.equal(db.values.get(districtDamageKey('legacy')), JSON.stringify(snapshot), 'load is read only');
+  saveDamage(db, 'legacy', loaded.snapshot);
+  assert.equal(loadDamage(db, 'legacy', current).status, 'loaded');
+  for (const alter of [
+    (world: City) => { world.position[0] += 0.25; },
+    (world: City) => { world.material[118600] = Mat.Glass; },
+    (world: City) => { world.buildings[48].h++; },
+    (world: City) => { world.district![0].target = [46, 3, 0.25]; },
+  ]) {
+    const changed = buildCity(7); alter(changed);
+    saveDamage(db, 'legacy', snapshot);
+    assert.equal(loadDamage(db, 'legacy', changed).status, 'mismatched');
+  }
+});
+test('a truncated object cannot pass append-only damage migration', () => {
+  const city = buildCity(7), count = 118614, db = storage();
+  const partial: City = { ...legacyDistrict(city), count, position: city.position.subarray(0, count * 3),
+    material: city.material.subarray(0, count), building: city.building.subarray(0, count), cell: city.cell.subarray(0, count) };
+  partial.state[0] = State.Gone;
+  saveDamage(db, 'partial', captureDamage(partial));
+  assert.equal(loadDamage(db, 'partial', city).status, 'mismatched');
 });

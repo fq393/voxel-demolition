@@ -11,7 +11,7 @@ export interface DamageSnapshot {
   /** Sorted, nonadjacent [first voxel, length] runs; loose/rubble state restores as an empty hole. */
   ranges: [number, number][];
 }
-export type DamageLoadStatus = 'loaded' | 'fresh' | 'invalid' | 'mismatched' | 'unavailable';
+export type DamageLoadStatus = 'loaded' | 'migrated' | 'fresh' | 'invalid' | 'mismatched' | 'unavailable';
 export interface DamageLoad { snapshot: DamageSnapshot; status: DamageLoadStatus }
 const layouts = new WeakMap<City, string>();
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -37,6 +37,24 @@ export function damageLayout(city: City): string {
   return layout;
 }
 function emptyDamage(city: City): DamageSnapshot { return { version: DAMAGE_VERSION, count: city.count, layout: damageLayout(city), ranges: [] }; }
+/** An appended street kit can retain old holes only when every old object and its fingerprint are unchanged. */
+function matchesWholeObjectPrefix(city: City, snapshot: DamageSnapshot): boolean {
+  const count = snapshot.count;
+  if (count <= 0 || count >= city.count) return false;
+  let objects = 0;
+  for (let v = 0; v < count; v++) objects = Math.max(objects, city.building[v] + 1);
+  if (objects > city.buildings.length) return false;
+  for (let object = 0; object < objects; object++) {
+    for (const v of city.buildings[object].cells) if (v >= count) return false;
+  }
+  for (let v = count; v < city.count; v++) if (city.building[v] < objects) return false;
+  const prefix: City = {
+    ...city, count, position: city.position.subarray(0, count * 3), material: city.material.subarray(0, count),
+    building: city.building.subarray(0, count), cell: city.cell.subarray(0, count), buildings: city.buildings.slice(0, objects),
+    district: city.district?.filter(site => site.object < objects && site.furniture.every(prop => prop.object < objects)),
+  };
+  return damageLayout(prefix) === snapshot.layout;
+}
 function validatedShape(value: unknown): DamageSnapshot | null {
   if (!record(value) || Object.keys(value).some(key => !['version', 'count', 'layout', 'ranges'].includes(key))
     || value.version !== DAMAGE_VERSION || !integer(value.count, 0, MAX_DAMAGE_VOXELS)
@@ -82,7 +100,10 @@ export function loadDamage(storage: ProgressStorage, playerId: string, city: Cit
   try { snapshot = validatedShape(JSON.parse(raw) as unknown); }
   catch { return { snapshot: empty, status: 'invalid' }; }
   if (!snapshot) return { snapshot: empty, status: 'invalid' };
-  if (snapshot.count !== city.count || snapshot.layout !== empty.layout) return { snapshot: empty, status: 'mismatched' };
+  if (snapshot.count !== city.count || snapshot.layout !== empty.layout) {
+    if (matchesWholeObjectPrefix(city, snapshot)) return { snapshot: { ...empty, ranges: snapshot.ranges }, status: 'migrated' };
+    return { snapshot: empty, status: 'mismatched' };
+  }
   return { snapshot, status: 'loaded' };
 }
 export function saveDamage(storage: ProgressStorage, playerId: string, snapshot: DamageSnapshot): { ok: boolean; error?: string } {

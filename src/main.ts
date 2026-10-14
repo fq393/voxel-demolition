@@ -42,6 +42,9 @@ import { CityLife } from './city-life.ts';
 import { captureDamage, clearDamage, damagedVoxels, loadDamage, saveDamage } from './district-save.ts';
 import { DistrictSigns } from './district-signs.ts';
 import { unsupportedInteriorFurniture } from './district-support.ts';
+import { UrbanPropRenderer } from './urban-prop-renderer.ts';
+import { UrbanChain } from './urban-chain.ts';
+import { BlastDetails } from './blast-details.ts';
 
 /** What a tool does where it hits: blast radius (m), share of it turned to dust, push (m/s), reach (m), seconds between uses, held fires again. */
 interface ToolSpec extends Tool {
@@ -53,6 +56,7 @@ interface ToolSpec extends Tool {
   auto: boolean;
   /** Goes off with fire and smoke. */
   explosive?: boolean;
+  fuel?: boolean;
   /** Throws a ball instead of hitting: radius (m), density, speed (m/s). */
   ball?: [number, number, number];
   /** A beam that burns away what it touches while held (it can cut a tower through). */
@@ -616,6 +620,9 @@ let cityBuildings: StaticBox[] = [];
 let cityAmbience: CityAmbience | null = null;
 let cityLife: CityLife | null = null;
 let streetDetails: StreetDetails | null = null;
+let urbanProps: UrbanPropRenderer | null = null;
+let urbanChain: UrbanChain | null = null;
+let blastDetails: BlastDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
 player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
@@ -719,6 +726,10 @@ async function start(): Promise<void> {
     view.scene.add(districtSigns.object);
     streetDetails = new StreetDetails(city);
     view.scene.add(streetDetails.object);
+    urbanProps = new UrbanPropRenderer(city, (voxels, hidden) => view.setDetailMask(voxels.map(v => physics.body[v]), hidden));
+    urbanChain = new UrbanChain(city);
+    blastDetails = new BlastDetails();
+    view.scene.add(urbanProps.object, blastDetails.object);
     cityJobs = new CityJobs(city, playerBoard.profile.playerId, () => pausePlay(), (text, complete) => {
       hud.toast(text);
       if (complete) sounds.zap(); else sounds.click();
@@ -783,7 +794,13 @@ async function start(): Promise<void> {
     saveProfile(profile);
   }
   applyProfile(profile);
-  if (SCENE === 'city') { restoreWorldDamage();cityJobs?.reset(city);restoreCityPose(); }
+  if (SCENE === 'city') {
+    restoreWorldDamage();
+    urbanProps?.reset(city);
+    urbanChain?.reset(city);
+    cityJobs?.reset(city);
+    restoreCityPose();
+  }
 
   await loader.finish();
   ready = true;
@@ -871,6 +888,7 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
   shards.clear();
   smoke?.clear();
   skids?.clear();
+  blastDetails?.clear();
   dustiness = 0;
   physics.destroy();
   carSlot = -1;
@@ -897,6 +915,8 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
     cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
   }
   streetDetails?.reset(city);
+  urbanProps?.reset(city);
+  urbanChain?.reset(city);
   cityLife?.reset(city, cityStatic);
   cityJobs?.reset(city);
   spawn();
@@ -946,9 +966,9 @@ function restoreWorldDamage():void {
   if(SCENE!=='city'||worldMode!=='sandbox')return;
   const loaded=loadDamage(damageStorage,playerBoard.profile.playerId,city);
   const removed=damagedVoxels(loaded.snapshot);
-  structure.leave(removed);physics.remove(removed);damageSerialized=JSON.stringify(loaded.snapshot);
+  structure.leave(removed);physics.remove(removed);damageSerialized=loaded.status==='migrated'?'':JSON.stringify(loaded.snapshot);
   for (const voxels of unsupportedInteriorFurniture(city)) { structure.leave(voxels);physics.remove(voxels); }
-  const note=loaded.status==='mismatched'?'建筑布局已更新，旧损坏存档未套用；金币和任务保留':loaded.status==='invalid'?'损坏存档无法读取，街区已恢复；金币和任务保留':'';
+  const note=loaded.status==='migrated'?'街区道具已增加，之前的拆除进度已保留':loaded.status==='mismatched'?'建筑布局已更新，旧损坏存档未套用；金币和任务保留':loaded.status==='invalid'?'损坏存档无法读取，街区已恢复；金币和任务保留':'';
   cityJobs?.setDamageSaveStatus(loaded.status!=='unavailable',note);
   streetDetails?.update(city.state);
 }
@@ -2001,8 +2021,11 @@ function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: Arr
   chips.burst(result.gone, at.toArray(), t.explosive ? 1 : 3, t.push * 0.9 + 3);
   chips.burst(result.loose, at.toArray(), 0.6, t.push * 0.6 + 2);
   if (t.explosive) {
-    effects.explosion(at.toArray(), t.radius * 1.4);
-    dustiness = Math.min(1.2, dustiness + t.radius / 5 + result.falling.length / 40000);
+    // Small fuel containers cascade quickly: leave room to see neighbouring props between flashes.
+    effects.explosion(at.toArray(), t.radius * (t.fuel ? 0.9 : 1.4));
+    const material = city.material[result.gone[0] ?? result.loose[0] ?? 0];
+    blastDetails?.burst(at.toArray(), t.radius, { fuel: t.fuel, tint: material === Mat.Wood ? 0x9b754b : material === Mat.Steel ? 0x767d7d : 0xb8a990 });
+    dustiness = Math.min(1.2, dustiness + t.radius / (t.fuel ? 8 : 5) + result.falling.length / 40000);
     sounds.blast(t.radius * 2, distance);
     hud.flash(Math.min(1, (t.radius * 6) / (distance + 5)));
     shake = Math.max(shake, Math.min(1.5, (t.radius * 6) / (distance + 6) + 0.25));
@@ -2438,16 +2461,22 @@ function tick(now: number): void {
   view.dust = dustiness;
   flyRockets(sim);
   laserFrame(now / 1000);
+  for (const event of urbanChain?.update(sim, worldMode === 'sandbox' && playing && !document.hidden) ?? []) {
+    const at = new THREE.Vector3(...event.at);
+    detonate(at, { ...TOOLS[2], radius: event.radius, push: event.push, core: 0.6, fuel: true }, player.position.distanceTo(at));
+  }
   alarms.update();
   impacts.update(dt);
   adaptSmoke(dt);
   chips.update(sim);
   shards.update(sim);
   effects.update(sim, cam);
+  blastDetails?.update(sim, cam);
   sky.update(cam, now / 1000);
   view.heatClock.value = simTime;
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
   streetDetails?.update(city.state);
+  urbanProps?.update(city);
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
@@ -2527,6 +2556,9 @@ if (testing) Object.assign(window, {
     get ready() { return ready; },
     get driving() { return driving; },
     get streetDetails() { return streetDetails; },
+    get urbanProps() { return urbanProps; },
+    get urbanChain() { return urbanChain; },
+    get blastDetails() { return blastDetails; },
     get jobs() { return cityJobs; },
     get life() { return cityLife; },
     get ambience() { return cityAmbience; },
@@ -2561,6 +2593,9 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       renderer: { calls: info.render.drawCalls, triangles: info.render.triangles, geometries: info.memory.geometries, textures: info.memory.textures, memoryBytes: info.memory.total },
       physics: { engine: 'three-avbd WebGPU', timestep: 1 / 60, voxels: city.count, loose: physics?.loose ?? 0 },
       streetDetails: streetDetails?.diagnostics ?? null,
+      urbanProps: urbanProps?.diagnostics ?? null,
+      urbanChain: urbanChain?.diagnostics ?? null,
+      blastDetails: blastDetails?.diagnostics ?? null,
       staticBuildings: cityBuildings.length,
       ambience: cityAmbience?.diagnostics ?? null,
       cityLife: cityLife?.diagnostics ?? null,
@@ -2583,6 +2618,8 @@ addEventListener('pagehide', () => {
   districtSigns?.dispose();
   cityJobs?.dispose();
   streetDetails?.dispose();
+  urbanProps?.dispose();
+  blastDetails?.dispose();
   (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy();
 });
 addEventListener('pageshow', (e) => {

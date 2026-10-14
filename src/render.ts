@@ -77,6 +77,8 @@ type Float = THREE.Node<'float'>;
 /** A read-only storage buffer of vec4s, as the voxel shaders read it. */
 const vec4Storage = (a: THREE.StorageInstancedBufferAttribute, n: number) => storage(a, 'vec4', n).toReadOnly();
 type StorageVec4 = ReturnType<typeof vec4Storage>;
+const floatStorage = (a: THREE.StorageInstancedBufferAttribute, n: number) => storage(a, 'float', n).toReadOnly();
+type StorageFloat = ReturnType<typeof floatStorage>;
 
 /** v rotated by the unit quaternion q = (u, w). */
 function rotate(q: Vec4, v: Vec3): Vec3 {
@@ -211,9 +213,11 @@ export class CityRenderer {
   private paints: THREE.StorageInstancedBufferAttribute | null = null;
   /** Per body: carried by a section (offset xyz, the section's body; w < 0: not carried). */
   private links: THREE.StorageInstancedBufferAttribute | null = null;
+  /** Intact authored prop surfaces replace their collision voxels visually, including glass. */
+  private detailMask: THREE.StorageInstancedBufferAttribute | null = null;
   private voxels: THREE.Mesh | null = null;
   /** The voxel buffers as the shaders read them (for the glass). */
-  private nodes: { bodies: StorageVec4; paints: StorageVec4; links: StorageVec4 } | null = null;
+  private nodes: { bodies: StorageVec4; paints: StorageVec4; links: StorageVec4; detailMask: StorageFloat } | null = null;
   /** Each body's time burned by the laser (the world's clock, s), for the cut's glow. */
   private heats: THREE.StorageInstancedBufferAttribute | null = null;
   /** Each body's voxel's place in the city as built (xyz): its faces' texture stays put on it wherever it goes. */
@@ -486,11 +490,13 @@ export class CityRenderer {
     this.bodies = new THREE.StorageInstancedBufferAttribute(new Float32Array(n * BODY_FLOATS), 4);
     this.paints = new THREE.StorageInstancedBufferAttribute(new Float32Array(n * 4), 4);
     this.links = new THREE.StorageInstancedBufferAttribute(new Float32Array(n * 4).fill(-1), 4);
+    this.detailMask = new THREE.StorageInstancedBufferAttribute(new Float32Array(n), 1);
     this.heats = new THREE.StorageInstancedBufferAttribute(new Float32Array(n).fill(-1e4), 1);
     this.homes = new THREE.StorageInstancedBufferAttribute(new Float32Array(n * 4), 4);
     const bodies = storage(this.bodies, 'vec4', (n * BODY_FLOATS) / 4).toReadOnly();
     const paints = storage(this.paints, 'vec4', n).toReadOnly();
     const links = storage(this.links, 'vec4', n).toReadOnly();
+    const detailMask = floatStorage(this.detailMask, n);
     const body = instanceIndex;
     // A voxel carried by a rigid section (physics.ts proxy) is drawn at the section's pose plus
     // its offset in the section; its own body waits parked meanwhile
@@ -506,13 +512,13 @@ export class CityRenderer {
     const size = bodies.element(base.add(B_SIZE / 4));
     const paint = paints.element(body);
     // The ground and bodies out of play aren't drawn: folded to a point
-    const hidden = select(linked, parentPos.z.lessThan(PARKED_BELOW), ownPos.z.lessThan(PARKED_BELOW).or(size.x.greaterThan(50))).or(paint.w.lessThan(0));
+    const hidden = select(linked, parentPos.z.lessThan(PARKED_BELOW), ownPos.z.lessThan(PARKED_BELOW).or(size.x.greaterThan(50))).or(paint.w.lessThan(0)).or(detailMask.element(body).greaterThan(0.5));
     // Clear glass is drawn by a mesh of its own (setGlass): see-through, after the rest
     const clear = abs(mod(paint.w, 16).sub(Mat.Glass)).lessThan(0.5);
     const local = positionGeometry.mul(size.xyz);
     const material = new THREE.MeshStandardNodeMaterial();
     material.positionNode = select(hidden.or(clear), pos.xyz, rotate(rot, local).add(pos.xyz));
-    this.nodes = { bodies, paints, links };
+    this.nodes = { bodies, paints, links, detailMask };
     const burnt = storage(this.heats, 'float', n).toReadOnly().element(body) as unknown as Float;
     const home = storage(this.homes, 'vec4', n).toReadOnly().element(body).xyz as unknown as Vec3;
     this.shadeVoxels(material, paint, body, size.xyz, home, rot, local, burnt);
@@ -521,6 +527,12 @@ export class CityRenderer {
     geometry.index = box.index;
     geometry.setAttribute('position', box.getAttribute('position'));
     geometry.setAttribute('normal', box.getAttribute('normal'));
+    // Storage bindings are not released by material disposal. Give the voxel geometry
+    // ownership so Three's attribute lifecycle also releases this buffer on rebuild.
+    for (const [name, attribute] of Object.entries({
+      voxelBodies: this.bodies, voxelPaints: this.paints, voxelLinks: this.links,
+      voxelHeats: this.heats, voxelHomes: this.homes, propDetailMask: this.detailMask,
+    })) geometry.setAttribute(name, attribute);
     geometry.instanceCount = n;
     const mesh = new THREE.Mesh(geometry, material);
     mesh.frustumCulled = false;
@@ -534,6 +546,20 @@ export class CityRenderer {
     const buffer = backend.get(this.bodies).buffer;
     if (!buffer) throw new Error('Three.js did not create a GPU buffer for the voxels');
     return buffer;
+  }
+
+  /** Mask presentation only: collision, raycasts, scoring and destruction keep their real voxel bodies. */
+  setDetailMask(bodies: ArrayLike<number>, hidden: boolean): void {
+    if (!this.detailMask) return;
+    const values = this.detailMask.array as Float32Array;
+    let changed = false;
+    for (let k = 0; k < bodies.length; k++) {
+      const body = bodies[k];
+      if (!Number.isInteger(body) || body < 0 || body >= values.length) continue;
+      const value = hidden ? 1 : 0;
+      if (values[body] !== value) { values[body] = value; changed = true; }
+    }
+    if (changed) this.detailMask.needsUpdate = true;
   }
 
   /**
@@ -634,7 +660,7 @@ export class CityRenderer {
       if (v >= 0 && city.material[v] === Mat.Glass && city.exposed[v]) ids.push(b);
     }
     if (!ids.length || !this.nodes) return;
-    const { bodies, paints, links } = this.nodes;
+    const { bodies, paints, links, detailMask } = this.nodes;
     const which = storage(new THREE.StorageInstancedBufferAttribute(Uint32Array.from(ids), 1), 'uint', ids.length).toReadOnly();
     const body = which.element(instanceIndex);
     const link = links.element(body);
@@ -646,7 +672,7 @@ export class CityRenderer {
     const pos = select(linked, vec4(rotate(rot, link.xyz).add(parentPos.xyz), 1), ownPos) as unknown as Vec4;
     const size = bodies.element(body.mul(BODY_FLOATS / 4).add(B_SIZE / 4));
     const paint = paints.element(body);
-    const gone = select(linked, parentPos.z.lessThan(PARKED_BELOW), ownPos.z.lessThan(PARKED_BELOW)).or(paint.w.lessThan(0));
+    const gone = select(linked, parentPos.z.lessThan(PARKED_BELOW), ownPos.z.lessThan(PARKED_BELOW)).or(paint.w.lessThan(0)).or(detailMask.element(body).greaterThan(0.5));
     // This vertex's face (bit of the open-face mask: -x, +x, -y, +y, -z, +z), and whether it's open
     const n = normalGeometry;
     const sideX = abs(n.x).greaterThan(0.5);

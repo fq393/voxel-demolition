@@ -91,7 +91,8 @@ test('removing furniture voxels changes interior collision without removing the 
 test('the complete city preserves original anchors and admits the same interior routes', () => {
   const original = buildCity(7, false), full = buildCity();
   assert.ok(full.anchor, 'upper-floor props use explicit anchors');
-  assert.equal(full.count - original.count, city.count, 'the district adds the same bounded geometry in the full city');
+  const streetPropVoxels = (full.urbanProps ?? []).reduce((sum, prop) => sum + prop.initial, 0);
+  assert.equal(full.count - original.count - streetPropVoxels, city.count, 'the district adds the same bounded geometry before appended street props');
   for (let v = 0; v < original.count; v++) {
     const object = original.buildings[original.building[v]];
     assert.equal(full.anchor![v], Number(original.cell[v] < object.w * object.d), `original support ${v} is preserved`);

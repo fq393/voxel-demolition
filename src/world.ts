@@ -11,6 +11,9 @@
 // and the check of what still stands. Glass is grouped into panes (a window each), which
 // shatter whole, and whose openings breathe out dust when a storey fails.
 
+import { buildDistrict } from './district-buildings.ts';
+import type { DistrictBuilding } from './district-layout.ts';
+
 /** Voxel edge (m). */
 export const VOXEL = 0.25;
 /** The tower's floors (voxels): the shop floor's height, then each storey's. */
@@ -42,6 +45,8 @@ export interface Building {
 
 export interface City {
   count: number;
+  /** Enterable buildings and furniture share the city's voxel collision world. */
+  district?: DistrictBuilding[];
   /** Per voxel: centre (xyz, m), material, object, and its cell in that object. */
   position: Float32Array;
   material: Uint8Array;
@@ -119,6 +124,7 @@ type Put = (x: number, y: number, z: number, m: Mat, colour?: number) => void;
 
 /** Builds a world object by object (buildCity, and the other scenes): `finish` makes the City. */
 export interface WorldBuilder {
+  readonly count: number;
   rnd: () => number;
   /**
    * An object of w × d × h voxels with its min corner at voxel (x0, y0, 0); `fill` puts its
@@ -300,10 +306,10 @@ export function worldBuilder(seed: number): WorldBuilder {
       ...grid,
     };
   };
-  return { rnd, place, box, last: () => buildings[buildings.length - 1], finish };
+  return { get count() { return buildings.length; }, rnd, place, box, last: () => buildings[buildings.length - 1], finish };
 }
 
-export function buildCity(seed = 7): City {
+export function buildCity(seed = 7, includeDistrict = true): City {
   const w = worldBuilder(seed);
   const { rnd, place, box } = w;
   // The tower: 13 x 11 m, a 4.5 m shop floor and ten 3 m storeys, a rounded front-left corner.
@@ -506,7 +512,10 @@ export function buildCity(seed = 7): City {
   signal(w, -15.5, 15.5, -1, 0);
   sign(w, -16.8, -14.2);
 
-  return w.finish({ pitch: BLOCK + STREET, street: STREET, blocks: 1 });
+  const district = includeDistrict ? buildDistrict(w) : [];
+  const city = w.finish({ pitch: BLOCK + STREET, street: STREET, blocks: 1 });
+  city.district = district;
+  return city;
 }
 
 /** A parked car along x: painted body, glass cabin on pillars, black tyres. */

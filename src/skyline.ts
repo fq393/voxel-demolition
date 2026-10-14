@@ -6,6 +6,7 @@
 import { abs, cameraPosition, float, floor, fract, hash, instanceColor, instanceIndex, normalWorld, positionWorld, select, smoothstep, step, varying, vec3 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { type City, random } from './world.ts';
+import { isDistrictLot } from './district-layout.ts';
 
 /**
  * Lots (block grid cells) left open: the ones the views of the tower are taken from, and a
@@ -22,7 +23,7 @@ export function skyline(city: City, seed = 17): THREE.InstancedMesh {
   const boxes: { x: number; y: number; w: number; d: number; h: number; tone: number }[] = [];
   for (let j = -RINGS; j <= RINGS; j++) {
     for (let i = -RINGS; i <= RINGS; i++) {
-      if (OPEN.has(`${i},${j}`)) continue;
+      if (OPEN.has(`${i},${j}`) || isDistrictLot(i, j)) continue;
       const [cx, cy] = [i * city.pitch, j * city.pitch];
       const ring = Math.max(Math.abs(i), Math.abs(j));
       // A plinth of paving under the lot

@@ -13,6 +13,7 @@ import { attribute, float, max, mix, mx_noise_float, positionLocal, select, smoo
 import { Bits } from './bits.ts';
 import { edgeShade } from './look.ts';
 import { type City, State, VOXEL } from './world.ts';
+import { type VehicleId, type VehicleSpec, vehicleSpec } from './vehicle-spec.ts';
 
 /** The model's voxel (m): a quarter of the world's, fine enough for the curves of a car. */
 const CELL = 0.0625;
@@ -195,7 +196,7 @@ function shape(x: number, y: number, z: number): Finish | null {
  * The exhaust tips: thin-walled titanium tubes standing out of the tail, their ends blued and golden from the
  * heat, a dark bore set just inside each.
  */
-function exhaustTips(): THREE.Group {
+function exhaustTips(halfLength = HALF_L, pipes = PIPES, out = PIPE_OUT): THREE.Group {
   const tips = new THREE.Group();
   // The tube along x, its end (the tip) at x = -PIPE_LEN / 2
   const tube = new THREE.CylinderGeometry(PIPE_R, PIPE_R, PIPE_LEN, 24, 1, true).rotateZ(Math.PI / 2);
@@ -205,11 +206,11 @@ function exhaustTips(): THREE.Group {
   metal.colorNode = mix(vec3(0.62, 0.63, 0.66), heat, toTip.mul(0.8)) as unknown as THREE.Node<'color'>;
   const bore = new THREE.CircleGeometry(PIPE_R * 0.92, 24).rotateY(-Math.PI / 2);
   const dark = new THREE.MeshBasicMaterial({ color: 0x050505 });
-  for (const [y, z] of PIPES) {
+  for (const [y, z] of pipes) {
     const pipe = new THREE.Mesh(tube, metal);
-    pipe.position.set(-HALF_L - PIPE_OUT + PIPE_LEN / 2, y, z);
+    pipe.position.set(-halfLength - out + PIPE_LEN / 2, y, z);
     const inside = new THREE.Mesh(bore, dark);
-    inside.position.set(-HALF_L - PIPE_OUT + 0.012, y, z);
+    inside.position.set(-halfLength - out + 0.012, y, z);
     tips.add(pipe, inside);
   }
   return tips;
@@ -226,8 +227,8 @@ function pack(i: number, j: number, k: number): number {
 }
 
 /** The key of the body's cell at `p` (m, the body's own frame). */
-function cellKey(p: THREE.Vector3): number {
-  return pack(Math.floor((p.x + HALF_L) / CELL), Math.floor((p.y + HALF_W) / CELL), Math.floor(p.z / CELL));
+function cellKey(p: THREE.Vector3, halfLength = HALF_L, halfWidth = HALF_W): number {
+  return pack(Math.floor((p.x + halfLength) / CELL), Math.floor((p.y + halfWidth) / CELL), Math.floor(p.z / CELL));
 }
 
 /** The six cells next to `key`'s. */
@@ -255,6 +256,102 @@ function bodyCells(): Cells {
       for (let k = k0; k < k0 + 2; k++) cells.set(pack(i, j, k), PAINT);
       cells.set(pack(i, j, k0 - 1), BLACK);
     }
+  return cells;
+}
+
+/** Authored city bodies share the damageable voxel skin with the original race car. */
+function cityBodyCells(spec: VehicleSpec): Cells {
+  const cells: Cells = new Map();
+  const [length, width, height] = spec.size;
+  const halfL = length / 2, halfW = width / 2;
+  const paint: Finish = { colour: spec.id === 'sedan' ? 0xc97864 : spec.id === 'pickup' ? 0xd8b47f : 0x83b4a6, rough: 0.31, metal: 0.48, glow: 0 };
+  const trim: Finish = { colour: 0xe8dfce, rough: 0.42, metal: 0.5, glow: 0 };
+  const panel: Finish = { colour: spec.id === 'sedan' ? 0xa76153 : spec.id === 'pickup' ? 0xae895b : 0x659488, rough: 0.46, metal: 0.35, glow: 0 };
+  const glass: Finish = { colour: 0x244c57, rough: 0.12, metal: 0.58, glow: 0 };
+  const bed: Finish = { colour: 0x404647, rough: 0.76, metal: 0.2, glow: 0 };
+  const wheelR = spec.id === 'sedan' ? 0.34 : 0.39;
+  const frontAxle = spec.id === 'sedan' ? 1.35 : 1.55;
+  const rearAxle = spec.id === 'sedan' ? -1.3 : -1.5;
+  const bodyHalfW = halfW - 0.12;
+  const finish = (x: number, y: number, z: number): Finish | null => {
+    const ay = Math.abs(y);
+    if (z < 0.22) return null;
+    // A narrowed nose and rear corners, plus inset rocker panels, keep the silhouette off a plain box.
+    const end = Math.max(0, Math.abs(x) - (halfL - 0.35)) / 0.35;
+    const hw = bodyHalfW - end * end * 0.1;
+    if (ay > hw) {
+      // Mirrors stay inside the declared box and attach just below the front side window.
+      const mirrorX = spec.id === 'sedan' ? 0.68 : 0.92;
+      const mirrorZ = spec.id === 'sedan' ? 1.02 : 1.31;
+      return Math.abs(x - mirrorX) < 0.13 && z > mirrorZ - 0.08 && z < mirrorZ + 0.04 && ay <= halfW - 0.015 ? paint : null;
+    }
+    for (const axle of [frontAxle, rearAxle]) {
+      if (ay > hw - 0.21 && Math.hypot(x - axle, z - wheelR) < wheelR + 0.065) return null;
+    }
+    let top: number;
+    let cabin = false;
+    let glassHere = false;
+    if (spec.id === 'sedan') {
+      top = x > 1.05 ? 0.78 - Math.max(0, x - 1.7) * 0.15 : x < -1.28 ? 0.87 : 0.84;
+      if (x > -1.28 && x < 1.12 && ay < 0.77) {
+        const roof = table([[-1.28, 0.9], [-0.86, height - 0.06], [0.35, height - 0.04], [0.62, height - 0.13], [1.12, 0.84]], x);
+        const rise = roof - (ay / 0.77) ** 6 * 0.08;
+        if (z <= rise && z > top) {
+          cabin = true;
+          const pillar = Math.abs(x + 0.88) < 0.07 || Math.abs(x + 0.15) < 0.055 || Math.abs(x - 0.58) < 0.065;
+          glassHere = z < rise - 0.09 && !pillar && (ay > 0.61 || x > 0.58 || x < -0.88);
+          top = rise;
+        }
+      }
+    } else if (spec.id === 'pickup') {
+      top = x > 1.1 ? 1.01 - Math.max(0, x - 1.8) * 0.16 : x < -0.58 ? 1.19 : 1.08;
+      // The bed is open: a ribbed floor, two rails and a tailgate, with no solid cargo box.
+      if (x < -0.58 && x > -halfL + 0.15 && ay < hw - 0.16 && z > 0.82) return null;
+      if (x < -0.58 && z > 0.7 && z < 0.82) return Math.floor((y + halfW) / 0.125) % 2 === 0 ? bed : BLACK;
+      if (x > -0.58 && x < 1.17 && ay < 0.79) {
+        const roof = table([[-0.58, height - 0.14], [-0.4, height - 0.045], [0.6, height - 0.045], [1.17, 1.08]], x);
+        const rise = roof - (ay / 0.79) ** 6 * 0.09;
+        if (z <= rise && z > 1.08) {
+          cabin = true;
+          const pillar = x < -0.45 || Math.abs(x - 0.52) < 0.065;
+          glassHere = z < rise - 0.1 && !pillar && (ay > 0.63 || x > 0.52 || x < -0.3);
+          top = rise;
+        }
+      }
+    } else {
+      // A tall cargo body, two rear doors, and a sloping windscreen above the short bonnet.
+      top = x < 0.75 ? height - 0.055 : x < 1.62 ? table([[0.75, height - 0.055], [1.62, 1.08]], x) : 1.08 - Math.max(0, x - 2) * 0.1;
+      top -= (ay / hw) ** 8 * 0.08;
+      cabin = x > 0.55 && x < 1.62 && z > 1.12;
+      glassHere = cabin && z < top - 0.1 && (ay > hw - 0.13 || x > 0.91) && Math.abs(x - 0.72) > 0.065;
+      if (x < -halfL + 0.1 && z > 0.65 && z < top - 0.12) {
+        if (ay < 0.035 || Math.abs(ay - 0.64) < 0.065 && Math.abs(z - 1.16) < 0.04) return BLACK;
+        if (Math.abs(ay - 0.83) < 0.04 && (Math.abs(z - 0.96) < 0.06 || Math.abs(z - 1.74) < 0.06)) return trim;
+      }
+      if (ay > hw - 0.07 && x < 0.55 && z > 1.06 && z < 1.16) return trim;
+      if (ay > hw - 0.07 && Math.abs(x + 0.62) < 0.04 && z > 0.76 && z < top - 0.17) return panel;
+    }
+    if (z > top) return null;
+    if (cabin && glassHere) return glass;
+    if (z < 0.36) return BLACK;
+    // Chrome bumpers, front grille and corner lamps are readable even from the chase camera.
+    if (Math.abs(x) > halfL - 0.13 && z > 0.4 && z < 0.52) return trim;
+    if (x > halfL - 0.14 && z > 0.53 && z < 0.69) return ay < 0.48 ? BLACK : ay > 0.59 && ay < 0.82 ? HEAD : paint;
+    if (x < -halfL + 0.13 && ay > hw - 0.2 && z > 0.56 && z < (spec.id === 'sedan' ? 0.75 : 0.96)) return z < 0.65 ? REVERSE : TAIL;
+    if (ay > hw - 0.055) {
+      if (z > 0.58 && z < 0.65) return panel;
+      const handleZ = spec.id === 'sedan' ? 0.88 : 1.03;
+      if (x > -0.18 && x < 0.02 && Math.abs(z - handleZ) < 0.035) return trim;
+      if (Math.abs(x + 0.3) < 0.025 && z > 0.42 && z < handleZ) return panel;
+      if (spec.id === 'pickup' && x < -0.58 && z > top - 0.075) return trim;
+    }
+    return paint;
+  };
+  const nx = Math.floor(length / CELL), ny = Math.floor(width / CELL), nz = Math.floor(height / CELL);
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) {
+    const f = finish(-halfL + (i + 0.5) * CELL, -halfW + (j + 0.5) * CELL, (k + 0.5) * CELL);
+    if (f) cells.set(pack(i, j, k), f);
+  }
   return cells;
 }
 
@@ -389,10 +486,10 @@ function voxelMaterial(look: Look, scars?: Scars): THREE.MeshStandardNodeMateria
 }
 
 /** A wheel's cells: tyre round a dark five-spoke rim, along y. */
-function wheelCells(): Cells {
+function wheelCells(wheelRadius = WHEEL_R, wheelWidth = WHEEL_W): Cells {
   const cells = new Map<number, Finish>();
-  const radius = WHEEL_R / CELL;
-  const width = Math.round(WHEEL_W / CELL);
+  const radius = wheelRadius / CELL;
+  const width = Math.round(wheelWidth / CELL);
   const r = Math.ceil(radius);
   for (let x = -r; x < r; x++) {
     for (let z = -r; z < r; z++) {
@@ -466,9 +563,43 @@ interface Look {
 
 const GEARS = [0, 55, 90, 125, 160, 195, 230, 300];
 
+interface Handling {
+  top: number;
+  acceleration: number;
+  grip: number;
+  rack: number;
+  yaw: number;
+  steering: number;
+  reverse: number;
+  lateralDamping: number;
+}
+const RACE_HANDLING: Handling = { top: 58, acceleration: 12, grip: GRIP, rack: 5, yaw: 10, steering: 0.7, reverse: 16, lateralDamping: 11 };
+const CITY_HANDLING: Record<VehicleId, Handling> = {
+  sedan: { top: 34, acceleration: 8.9, grip: 15, rack: 5.2, yaw: 10, steering: 0.72, reverse: 10, lateralDamping: 11 },
+  pickup: { top: 29, acceleration: 6.8, grip: 14, rack: 4.3, yaw: 7.5, steering: 0.61, reverse: 8, lateralDamping: 12.5 },
+  van: { top: 24, acceleration: 5.1, grip: 10.5, rack: 3.5, yaw: 6, steering: 0.59, reverse: 7, lateralDamping: 10 },
+};
+
 /** The race car: its model, its handling, and where it is. */
 export class Car {
   readonly object = new THREE.Group();
+  /** Null is the original track car; city cars use the catalog and their own collider/mass. */
+  readonly vehicleId: VehicleId | null;
+  readonly size: readonly [number, number, number];
+  readonly mass: number;
+  private readonly handling: Handling;
+  private readonly halfLength: number;
+  private readonly halfWidth: number;
+  private readonly wheelRadius: number;
+  private readonly frontAxle: number;
+  private readonly rearAxle: number;
+  private readonly track: number;
+  private readonly bodyOrigin: [number, number, number];
+  private readonly pipes: number[][];
+  private readonly pipeOut: number;
+  private readonly gunHeight: number;
+  private readonly rocketHeight: number;
+  private disposed = false;
   /** Where it is (m; z up), its heading (rad from +x), its velocity (m/s, world), its turning (rad/s). */
   readonly position = new THREE.Vector3();
   heading = 0;
@@ -504,7 +635,7 @@ export class Car {
   private readonly arms: { pivot: THREE.Object3D; launcher: THREE.Object3D; side: number }[] = [];
   private readonly body: THREE.Mesh;
   /** The body's cells as built, those on its skin, and as they are now (bitten into). */
-  private readonly whole = bodyCells();
+  private readonly whole: Cells;
   private readonly skin = new Set<number>();
   private cells = new Map<number, Finish>();
   private readonly scars: Scars;
@@ -519,7 +650,27 @@ export class Car {
   private braking = false;
   private reversing = false;
 
-  constructor() {
+  constructor(id?: VehicleId) {
+    const spec = id === undefined ? null : vehicleSpec(id);
+    this.vehicleId = spec?.id ?? null;
+    this.size = spec?.size ?? [CAR_SIZE[0], CAR_SIZE[1], CAR_SIZE[2]];
+    this.mass = spec?.mass ?? CAR_MASS;
+    this.handling = spec ? CITY_HANDLING[spec.id] : RACE_HANDLING;
+    this.halfLength = this.size[0] / 2;
+    this.halfWidth = this.size[1] / 2;
+    this.wheelRadius = spec && spec.id !== 'sedan' ? 0.39 : WHEEL_R;
+    this.frontAxle = spec ? spec.id === 'sedan' ? 1.35 : 1.55 : FRONT_AXLE;
+    this.rearAxle = spec ? spec.id === 'sedan' ? -1.3 : -1.5 : REAR_AXLE;
+    const wheelWidth = spec ? spec.id === 'sedan' ? 0.25 : 0.3125 : WHEEL_W;
+    this.track = spec ? this.halfWidth - wheelWidth / 2 - 0.015 : TRACK;
+    this.bodyOrigin = spec ? [this.halfLength / CELL, this.halfWidth / CELL, 0] : BODY_ORIGIN;
+    // Garage swaps reuse the city afterfire pool, so every city variant has two pipe sockets.
+    this.pipes = spec ? [[-0.5, 0.43], [0.5, 0.43]] : PIPES;
+    this.pipeOut = spec ? 0 : PIPE_OUT;
+    this.gunHeight = spec ? spec.id === 'sedan' ? 0.67 : 0.9 : 0.5;
+    this.rocketHeight = spec ? spec.id === 'sedan' ? 0.45 : 0.88 : 0.35;
+    this.whole = spec ? cityBodyCells(spec) : bodyCells();
+    this.object.name = spec ? `vehicle-${spec.id}` : 'track-race-car';
     const look = this.look;
     for (const key of this.whole.keys()) if (neighbours(key).some((n) => !this.whole.has(n))) this.skin.add(key);
     this.cells = new Map(this.whole);
@@ -527,19 +678,23 @@ export class Car {
       Array.from({ length: SCARS }, () => new THREE.Vector4(1e3, 1e3, 1e3, 0.01)),
       'vec4',
     ) as unknown as Scars;
-    this.body = voxelMesh(this.cells, BODY_ORIGIN, look, this.scars);
+    this.body = voxelMesh(this.cells, this.bodyOrigin, look, this.scars);
+    this.body.name = 'damageable-body';
     this.object.add(this.body);
-    this.body.add(exhaustTips());
-    const wheel = wheelCells();
-    const half = WHEEL_W / CELL / 2;
+    const tips = exhaustTips(this.halfLength, this.pipes, this.pipeOut);
+    tips.name = 'exhaust-tips';
+    this.body.add(tips);
+    const wheel = wheelCells(this.wheelRadius, wheelWidth);
+    const half = spec ? Math.round(wheelWidth / CELL) / 2 : WHEEL_W / CELL / 2;
     for (const [x, s] of [
-      [FRONT_AXLE, 1],
-      [FRONT_AXLE, -1],
-      [REAR_AXLE, 1],
-      [REAR_AXLE, -1],
+      [this.frontAxle, 1],
+      [this.frontAxle, -1],
+      [this.rearAxle, 1],
+      [this.rearAxle, -1],
     ]) {
       const hub = new THREE.Group();
-      hub.position.set(x, s * TRACK, WHEEL_R);
+      hub.name = `${this.wheels.length < 2 ? 'front' : 'rear'}-${s > 0 ? 'left' : 'right'}-wheel`;
+      hub.position.set(x, s * this.track, this.wheelRadius);
       hub.add(voxelMesh(wheel, [0, half, 0], look));
       this.object.add(hub);
       this.wheels.push(hub);
@@ -547,14 +702,16 @@ export class Car {
     // Machine guns in the bonnet either side of its valley
     for (const s of [1, -1]) {
       const gun = voxelMesh(gunCells(), [0.5, 0.5, 0], look);
-      gun.position.set(1.25, s * 0.5, 0.5);
+      gun.position.set(spec?.id === 'van' ? 1.7 : 1.25, s * 0.5, this.gunHeight);
+      gun.visible = false;
       this.body.add(gun);
       this.mgs.push(gun);
     }
     // Rocket launchers on yellow arms from the hips: stowed flat inside, swung up and out
     for (const s of [1, -1]) {
       const pivot = new THREE.Group();
-      pivot.position.set(-1.35, s * 0.62, 0.72);
+      pivot.position.set(-1.35, s * (spec ? 0.54 : 0.62), this.rocketHeight);
+      pivot.visible = false;
       const arm = voxelMesh(armCells(ARM), [1, 1, 0], look);
       pivot.add(arm);
       const launcher = voxelMesh(launcherCells(), [0.5, 0.5, 0.5], look);
@@ -597,6 +754,7 @@ export class Car {
    * it runs into is main.ts's (`sweep` below).
    */
   step(dt: number, d: Drive): void {
+    if (this.disposed) return;
     this.sub.copy(this.position);
     this.subHeading = this.heading;
     const f = this.forward;
@@ -605,41 +763,42 @@ export class Car {
     const across = this.velocity.dot(side);
     // Gears: up at the top of each (an afterfire, the drive unbroken), down as it slows
     const kmh = Math.abs(along) * 3.6;
-    if (this.gear < GEARS.length - 1 && kmh > GEARS[this.gear]) {
+    const gearScale = this.handling.top / RACE_HANDLING.top;
+    if (this.gear < GEARS.length - 1 && kmh > GEARS[this.gear] * gearScale) {
       this.gear++;
       if (d.throttle > 0.3) this.shifts++;
-    } else if (this.gear > 1 && kmh < GEARS[this.gear - 1] * 0.92) this.gear--;
-    const low = GEARS[this.gear - 1];
-    const within = Math.min(1, (kmh - low) / (GEARS[this.gear] - low));
+    } else if (this.gear > 1 && kmh < GEARS[this.gear - 1] * gearScale * 0.92) this.gear--;
+    const low = GEARS[this.gear - 1] * gearScale;
+    const within = Math.min(1, (kmh - low) / (GEARS[this.gear] * gearScale - low));
     this.revs = 0.25 + 0.75 * (this.gear === 1 ? within : 0.35 + within * 0.65);
     // Engine and brakes: strong off the line, fading towards top speed (about 210 km/h, 250 boosting: a
     // circuit's pace); braking, then reverse
-    const top = d.boost ? 70 : 58;
+    const top = this.handling.top * (d.boost ? 70 / 58 : 1);
     this.braking = (d.throttle < 0 && along > 0.5) || (d.handbrake && Math.abs(along) > 0.5);
     this.reversing = d.throttle < 0 && along <= 0.5;
     if (d.throttle > 0) {
-      const push = along < 0 ? 30 : 12 * Math.max(0, 1 - (along / top) ** 2) * (d.boost ? 1.4 : 1);
+      const push = along < 0 ? 30 : this.handling.acceleration * Math.max(0, 1 - (along / top) ** 2) * (d.boost ? 1.4 : 1);
       along += push * d.throttle * dt;
     } else if (d.throttle < 0) {
-      if (along > 0.5) along = Math.max(0, along + 26 * d.throttle * dt);
-      else along = Math.max(-16, along + 9 * d.throttle * dt);
+      if (along > 0.5) along = Math.max(0, along + 26 * (CAR_MASS / this.mass) * d.throttle * dt);
+      else along = Math.max(-this.handling.reverse, along + this.handling.acceleration * 0.75 * d.throttle * dt);
     }
     // Rolling and air: coasting slows it
     along -= Math.sign(along) * Math.min(Math.abs(along), (0.9 + 0.00045 * along * along) * dt);
     if (d.handbrake) along -= Math.sign(along) * Math.min(Math.abs(along), 7 * dt);
     // Steering: the lock falls away with speed; the wheel winds on steadily and comes back to the middle
     // quicker (a weighted rack, not a switch)
-    const most = 0.7 / (1 + Math.abs(along) / 28);
+    const most = this.handling.steering / (1 + Math.abs(along) / 28);
     const want = d.steer * most;
-    const rate = (Math.abs(want) < Math.abs(this.steer) || want * this.steer < 0 ? 6 : 5) * dt;
+    const rate = (Math.abs(want) < Math.abs(this.steer) || want * this.steer < 0 ? this.handling.rack * 1.2 : this.handling.rack) * dt;
     this.steer += Math.max(-rate, Math.min(rate, want - this.steer));
     // Yaw from the steering (a bicycle, 2.7 m between the axles), up to what the tyres can hold (about 1.1 g
     // across: turn harder at speed and it runs wide, not round); the car's weight takes a moment to turn, and
     // the handbrake lets the back step out
-    const wheelbase = FRONT_AXLE - REAR_AXLE;
-    const grip = GRIP / Math.max(Math.abs(along), 1);
+    const wheelbase = this.frontAxle - this.rearAxle;
+    const grip = this.handling.grip / Math.max(Math.abs(along), 1);
     const target = Math.max(-grip, Math.min(grip, (along / wheelbase) * Math.tan(this.steer))) * (d.handbrake ? 1.45 : 1);
-    this.yawRate += (target - this.yawRate) * Math.min(1, dt * (d.handbrake ? 3 : 10));
+    this.yawRate += (target - this.yawRate) * Math.min(1, dt * (d.handbrake ? 3 : this.handling.yaw));
     this.heading += this.yawRate * dt;
     // The velocity keeps its way as the car turns under it: what's now sideways to the new
     // heading is sliding, and the grip takes that away (fast; slowly under the handbrake: a drift)
@@ -647,13 +806,13 @@ export class Car {
     const nf = this.forward;
     const ns = new THREE.Vector2(-nf.y, nf.x);
     const on = this.velocity.dot(nf);
-    const slide = this.velocity.dot(ns) * Math.exp(-dt * (d.handbrake ? 1.6 : 11));
+    const slide = this.velocity.dot(ns) * Math.exp(-dt * (d.handbrake ? 1.6 : this.handling.lateralDamping));
     this.slip = Math.abs(slide);
     this.skid = Math.max(Math.min(1, Math.max(0, (this.slip - 1.5) / 5)), d.handbrake ? Math.min(1, Math.abs(on) / 12) : 0);
     this.velocity.copy(nf.multiplyScalar(on)).add(ns.multiplyScalar(slide));
     this.position.x += this.velocity.x * dt;
     this.position.y += this.velocity.y * dt;
-    this.roll += (along / WHEEL_R) * dt;
+    this.roll += (along / this.wheelRadius) * dt;
     // Body lean and pitch, for the look of it: squat under power, dive under brakes, a nod at each shift
     this.lean += (Math.max(-0.06, Math.min(0.06, -this.yawRate * along * 0.004)) - this.lean) * Math.min(1, dt * 6);
     const squat = this.braking ? 0.035 : d.throttle > 0 ? -0.015 : 0;
@@ -673,9 +832,10 @@ export class Car {
 
   /** Draw it `alpha` of the way from the last step's pose to this one's. */
   draw(alpha: number): void {
+    if (this.disposed) return;
     if (this.bitten) {
       // The body as it is now (once a frame, however many bites): into the same buffers while they have room
-      const g = voxelGeometry(this.cells, BODY_ORIGIN, this.body.geometry);
+      const g = voxelGeometry(this.cells, this.bodyOrigin, this.body.geometry);
       if (g !== this.body.geometry) {
         this.body.geometry.dispose();
         this.body.geometry = g;
@@ -693,7 +853,7 @@ export class Car {
     // Machine guns: up out of the bonnet
     const g = THREE.MathUtils.smoothstep(this.guns, 0, 1);
     for (const m of this.mgs) {
-      m.position.z = 0.5 + g * 0.16;
+      m.position.z = this.gunHeight + g * 0.16;
       m.visible = this.guns > 0.02;
     }
     // Launchers: the arm rises from inside the hip, then swings out to the side at 40 degrees;
@@ -701,7 +861,7 @@ export class Car {
     const rise = THREE.MathUtils.smoothstep(this.rockets, 0, 0.5);
     const swing = THREE.MathUtils.smoothstep(this.rockets, 0.4, 1);
     for (const { pivot, launcher, side } of this.arms) {
-      pivot.position.z = 0.35 + rise * 0.37;
+      pivot.position.z = this.rocketHeight + rise * 0.37;
       pivot.rotation.set(-side * swing * 0.7, -swing * 0.25, 0);
       launcher.rotation.set(side * swing * 0.7, swing * 0.25, 0, 'ZYX');
       pivot.visible = this.rockets > 0.02;
@@ -743,18 +903,18 @@ export class Car {
   private bite(at: THREE.Vector3, amount: number): void {
     this.object.updateMatrixWorld(true);
     const p = this.body.worldToLocal(at.clone());
-    p.set(THREE.MathUtils.clamp(p.x, -HALF_L, HALF_L), THREE.MathUtils.clamp(p.y, -HALF_W, HALF_W), THREE.MathUtils.clamp(p.z, 0.25, 1.05));
+    p.set(THREE.MathUtils.clamp(p.x, -this.halfLength, this.halfLength), THREE.MathUtils.clamp(p.y, -this.halfWidth, this.halfWidth), THREE.MathUtils.clamp(p.z, 0.25, this.vehicleId ? this.size[2] - 0.08 : 1.05));
     // In from there towards the middle until it meets the body (its box is square; the car isn't)
-    const middle = new THREE.Vector3(0, 0, 0.55);
+    const middle = new THREE.Vector3(0, 0, this.vehicleId ? this.size[2] * 0.45 : 0.55);
     const step = middle.clone().sub(p).setLength(CELL);
-    for (let n = 0; n < 40 && !this.cells.has(cellKey(p)) && p.distanceTo(middle) > CELL; n++) p.add(step);
+    for (let n = 0; n < (this.vehicleId ? 50 : 40) && !this.cells.has(cellKey(p, this.halfLength, this.halfWidth)) && p.distanceTo(middle) > CELL; n++) p.add(step);
     const r = BITE[0] + (BITE[1] - BITE[0]) * Math.min(1, amount / 0.5);
     (this.scars.array as THREE.Vector4[])[this.scar].set(p.x, p.y, p.z, r * 1.8);
     this.scar = (this.scar + 1) % SCARS;
     // The cells within reach of it go (the edge ragged: some a little further in stay, some further out go)
     const cell = (v: number, half: number) => Math.floor((v + half) / CELL);
-    const [i0, i1] = [cell(p.x - r, HALF_L), cell(p.x + r, HALF_L)];
-    const [j0, j1] = [cell(p.y - r, HALF_W) - 2, cell(p.y + r, HALF_W) + 2];
+    const [i0, i1] = [cell(p.x - r, this.halfLength), cell(p.x + r, this.halfLength)];
+    const [j0, j1] = [cell(p.y - r, this.halfWidth) - 2, cell(p.y + r, this.halfWidth) + 2];
     const [k0, k1] = [Math.floor((p.z - r) / CELL), Math.floor((p.z + r) / CELL)];
     const gone: number[] = [];
     const flying: THREE.Vector3[] = [];
@@ -766,7 +926,7 @@ export class Car {
           const key = pack(i, j, k);
           const f = this.cells.get(key);
           if (!f) continue;
-          centre.set(-HALF_L + (i + 0.5) * CELL, -HALF_W + (j + 0.5) * CELL, (k + 0.5) * CELL);
+          centre.set(-this.halfLength + (i + 0.5) * CELL, -this.halfWidth + (j + 0.5) * CELL, (k + 0.5) * CELL);
           if (centre.distanceTo(p) > r * (0.55 + 0.6 * Math.random())) continue;
           this.cells.delete(key);
           gone.push(key);
@@ -792,21 +952,46 @@ export class Car {
   /** The engine, behind the cabin (world, m): where the smoke and fire of a damaged car come out. */
   engine(): THREE.Vector3 {
     this.object.updateMatrixWorld(true);
-    return this.body.localToWorld(new THREE.Vector3(-1.1, 0, 0.95));
+    return this.body.localToWorld(new THREE.Vector3(this.vehicleId ? 1.35 : -1.1, 0, this.vehicleId ? Math.min(0.95, this.size[2] * 0.7) : 0.95));
   }
 
   /** Where the rear tyres touch the ground (world, m). */
   rearTyres(): THREE.Vector3[] {
     this.object.updateMatrixWorld(true);
-    return [1, -1].map((s) => this.object.localToWorld(new THREE.Vector3(REAR_AXLE, s * TRACK, 0)));
+    return [1, -1].map((s) => this.object.localToWorld(new THREE.Vector3(this.rearAxle, s * this.track, 0)));
   }
 
   /** Where the exhausts are (world, m), and the way out of them (backwards). */
   exhausts(): { at: THREE.Vector3[]; back: THREE.Vector3 } {
     this.object.updateMatrixWorld(true);
-    const at = PIPES.map(([y, z]) => this.body.localToWorld(new THREE.Vector3(-HALF_L - PIPE_OUT, y, z)));
+    const at = this.pipes.map(([y, z]) => this.body.localToWorld(new THREE.Vector3(-this.halfLength - this.pipeOut, y, z)));
     const f = this.forward;
     return { at, back: new THREE.Vector3(-f.x, -f.y, 0.15).normalize() };
+  }
+
+  /** A garage replacement owns all of this car's GPU resources, including its separate bits pool. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const collect = (object: THREE.Object3D): void => {
+      if (!(object instanceof THREE.Mesh)) return;
+      geometries.add(object.geometry);
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) materials.add(material);
+      if (object instanceof THREE.InstancedMesh) object.dispose();
+    };
+    this.object.traverse(collect);
+    this.bits.object.traverse(collect);
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+    this.bits.clear();
+    this.object.removeFromParent();
+    this.bits.object.removeFromParent();
+    this.object.clear();
+    this.cells.clear();
+    this.whole.clear();
+    this.skin.clear();
   }
 }
 
@@ -815,8 +1000,8 @@ export class Car {
  * (Each object's grid, over the part of it under the car's bounds; a voxel counts if its
  * centre is inside the box grown by half a voxel.)
  */
-export function sweep(city: City, x: number, y: number, heading: number): number[] {
-  const [L, W, H] = CAR_SIZE;
+export function sweep(city: City, x: number, y: number, heading: number, size: readonly [number, number, number] = [CAR_SIZE[0], CAR_SIZE[1], CAR_SIZE[2]]): number[] {
+  const [L, W, H] = size;
   const [c, s] = [Math.cos(heading), Math.sin(heading)];
   const hx = L / 2 + VOXEL / 2;
   const hy = W / 2 + VOXEL / 2;

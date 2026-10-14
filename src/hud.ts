@@ -44,10 +44,19 @@ const TOOL_LABELS: Record<string, string> = {
   Charge: '爆破炸药',
   'Wrecking ball': '破拆球',
   'Machine gun': '机枪',
+  AK47: 'AK47',
 };
 const toolLabel = (name: string): string => TOOL_LABELS[name] ?? name;
 
 const CSS = `
+.rifle-ammo { position:absolute; bottom:112px; left:50%; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:7px 10px; border:1px solid #8a7549; border-radius:10px; background:rgba(18,25,24,.88); color:#f5dfac; font-size:12px; }
+.rifle-ammo[hidden] { display:none; }
+.hud .tip.rifle-tip { bottom:194px; }
+.rifle-ammo button { pointer-events:auto; min-height:32px; padding:0 10px; background:#473822; border:1px solid #8a7549; border-radius:7px; color:#ffdaa1; cursor:pointer; }
+.rifle-ammo button:disabled { opacity:.6; cursor:default; }
+body.touch .rifle-ammo { bottom:78px; }
+body.touch .rifle-ammo button { min-height:44px; }
+@media (orientation:portrait) { body.touch .rifle-ammo { bottom:14px; } }
 .hud { position: fixed; inset: 0; z-index: 1; pointer-events: none; user-select: none; }
 .hud .cross { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); }
 .hud .cross::before, .hud .cross::after { content: ''; position: absolute; background: rgba(255,255,255,0.9); box-shadow: 0 0 2px rgba(0,0,0,0.8); }
@@ -241,6 +250,10 @@ export class Hud {
   private toastTimer = 0;
   private readonly keysEl = document.createElement('div');
   private readonly speedo = document.createElement('div');
+  private readonly rifleAmmo = document.createElement('div');
+  private readonly rifleCount = document.createElement('span');
+  private readonly rifleReload = document.createElement('button');
+  onRifleReload: (() => void) | null = null;
 
   readonly tools: Tool[];
   readonly settings: Settings;
@@ -261,6 +274,15 @@ export class Hud {
     keys.className = 'keys';
     this.setKeys(ON_FOOT);
     this.speedo.className = 'speedo';
+    this.rifleAmmo.className = 'rifle-ammo';
+    this.rifleAmmo.hidden = true;
+    this.rifleReload.type = 'button';
+    this.rifleReload.textContent = '换弹 · V';
+    this.rifleReload.setAttribute('aria-label', 'AK47 换弹');
+    this.rifleReload.addEventListener('click', () => this.onRifleReload?.());
+    this.rifleAmmo.addEventListener('mousedown', e => e.stopPropagation());
+    this.rifleAmmo.addEventListener('pointerdown', e => e.stopPropagation());
+    this.rifleAmmo.append(this.rifleCount, this.rifleReload);
     this.speedo.innerHTML = `<div class="gear">1</div><div class="v">0</div><div class="u">KM/H</div><div class="health"><i></i></div><div class="boost"><i></i></div><div class="pods"><span>火箭</span><div class="pod"><i></i></div><div class="pod"><i></i></div></div>`;
     for (const [i, t] of tools.entries()) {
       const slot = document.createElement('div');
@@ -350,7 +372,7 @@ export class Hud {
     this.wheelPointer.className = 'pointer';
     this.wheel.append(this.wheelCentre, this.wheelPointer);
     this.toastEl.className = 'toast';
-    this.root.append(this.flashEl, this.cross, this.dock, this.tip, this.picked, this.wheel, this.statsLine, keys, this.speedo, this.toastEl);
+    this.root.append(this.flashEl, this.cross, this.dock, this.tip, this.picked, this.wheel, this.statsLine, keys, this.speedo, this.toastEl, this.rifleAmmo);
     let learn = true;
     try {
       learn = !localStorage.getItem('city.switched');
@@ -618,6 +640,15 @@ export class Hud {
 
   aim(onSomething: boolean): void {
     this.cross.classList.toggle('hit', onSomething);
+  }
+
+  setRifleAmmo(state: { rounds: number; capacity: number; reloading: boolean; reloadProgress: number } | null): void {
+    this.rifleAmmo.hidden = !state;
+    this.tip.classList.toggle('rifle-tip', !!state);
+    if (!state) return;
+    const text = state.reloading ? `换弹 ${Math.round(state.reloadProgress * 100)}%` : `AK47 · ${state.rounds} / ${state.capacity}`;
+    if (this.rifleCount.textContent !== text) this.rifleCount.textContent = text;
+    this.rifleReload.disabled = state.reloading || state.rounds === state.capacity;
   }
 
   stats(text: string): void {

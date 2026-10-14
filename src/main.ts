@@ -45,6 +45,8 @@ import { unsupportedInteriorFurniture } from './district-support.ts';
 import { UrbanPropRenderer } from './urban-prop-renderer.ts';
 import { UrbanChain } from './urban-chain.ts';
 import { BlastDetails } from './blast-details.ts';
+import { RifleMagazine } from './rifle-magazine.ts';
+import { RifleTraces } from './rifle-traces.ts';
 
 /** What a tool does where it hits: blast radius (m), share of it turned to dust, push (m/s), reach (m), seconds between uses, held fires again. */
 interface ToolSpec extends Tool {
@@ -57,6 +59,7 @@ interface ToolSpec extends Tool {
   /** Goes off with fire and smoke. */
   explosive?: boolean;
   fuel?: boolean;
+  rifle?: boolean;
   /** Throws a ball instead of hitting: radius (m), density, speed (m/s). */
   ball?: [number, number, number];
   /** A beam that burns away what it touches while held (it can cut a tower through). */
@@ -69,7 +72,11 @@ const TOOLS: ToolSpec[] = [
   { name: 'Rocket', icon: `<svg viewBox="0 0 24 24"><path d="M5 19l3-3"/><path d="M9 15l-3-3 7-7c2-2 5-2 6-2 0 1 0 4-2 6z"/><path d="M14 10l-4 4"/><path d="M7 12l-3 1 2-4 3 0"/><path d="M12 17l-1 3 4-2 0-3"/></svg>`, hint: '瞄准墙体开火，炸开一处缺口', radius: 1.7, core: 0.45, push: 12, explosive: true, reach: 600, cooldown: 0.7, auto: false },
   { name: 'Charge', icon: `<svg viewBox="0 0 24 24"><rect x="4" y="9" width="12" height="11" rx="1.5"/><path d="M8 9V6h4v3"/><path d="M12 6c0-2 2-3 4-3"/><path d="M18 2l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/></svg>`, hint: '爆破炸药：一次拆掉大片楼层', radius: 3.2, core: 0.4, push: 14, explosive: true, reach: 600, cooldown: 1.2, auto: false },
   { name: 'Wrecking ball', icon: `<svg viewBox="0 0 24 24"><circle cx="12" cy="14" r="7"/><path d="M12 7V2"/><circle cx="12" cy="2.5" r="0"/></svg>`, hint: '投掷两吨破拆球', radius: 0, core: 0, push: 0, reach: 0, cooldown: 0.5, auto: false, ball: [0.55, 3, 32] },
+  { name: 'AK47', icon: `<svg viewBox="0 0 24 24"><path d="M3 10h11l3-2h4M14 10l5 2h3M5 10l-2 6h3l3-5M10 12l1 6 4-1-2-5M6 8h7"/></svg>`, hint: '按住连射，打碎木箱和油桶 · V 换弹', radius: 0.29, core: 0.7, push: 4, reach: 200, cooldown: 0.1, auto: true, rifle: true },
 ];
+const RIFLE = 5;
+const rifleMagazine = new RifleMagazine();
+const rifleTraces = new RifleTraces();
 
 /** Hooks for the sky and the smoke and dust (sky.ts, particles.ts), when present. */
 interface Effects {
@@ -136,6 +143,7 @@ try {
 let profile: DeviceProfile | null = null;
 const sounds = new Sounds();
 const view = new CityRenderer(canvas);
+view.scene.add(rifleTraces.object);
 const hand = new ViewModel();
 view.camera.add(hand.object);
 view.scene.add(view.camera);
@@ -170,6 +178,7 @@ const hud = new Hud(
 );
 hud.showMenu(!testing);
 hud.onReset = () => void rebuild().then(() => hud.toast('已重建'));
+hud.onRifleReload = () => { if (playing && tool === RIFLE && !driving && rifleMagazine.reload()) sounds.click(); };
 const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
 const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
@@ -338,6 +347,7 @@ addEventListener('keydown', (e) => {
   // Hold Tab: the tool wheel (the mouse aims it instead of turning the view)
   if (e.code === 'Tab' && !hud.wheelOpen) hud.openWheel();
   if (e.code === 'KeyF') pressF();
+  if (e.code === 'KeyV') hud.onRifleReload?.();
   if (e.code === 'KeyR') void rebuild();
   if (e.code === 'KeyX') {
     timeScale = timeScale === 1 ? SLOW : 1;
@@ -559,6 +569,7 @@ function selectTool(i: number, announce = false): void {
   hud.select(i, announce);
   hand.select(i);
   touch?.setTool(TOOLS[i].icon);
+  hud.setRifleAmmo(i === RIFLE && !driving ? rifleMagazine.diagnostics : null);
 }
 hud.onPick = (i) => selectTool(i, true);
 hud.onSwipe = (tools) => carousel(tools * SCROLL_PER_TOOL);
@@ -889,6 +900,9 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
   smoke?.clear();
   skids?.clear();
   blastDetails?.clear();
+  rifleMagazine.reset();
+  rifleTraces.clear();
+  hand.reset();
   dustiness = 0;
   physics.destroy();
   carSlot = -1;
@@ -1721,9 +1735,23 @@ let dustiness = 0;
 
 function useTool(): void {
   const t = TOOLS[tool];
+  if (t.rifle && !rifleMagazine.fire()) return;
   hand.use(t.cooldown);
   player.eye(eye);
   player.look(dir);
+  if (t.rifle) {
+    const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
+    const at = eye.clone().addScaledVector(dir, hit ? hit.t : 100);
+    rifleTraces.fire(hand.muzzle(new THREE.Vector3(), RIFLE), at);
+    sounds.gun(1);
+    shake = Math.max(shake, 0.035);
+    if (hit && hit.voxel >= 0) {
+      at.addScaledVector(new THREE.Vector3(...hit.normal), -0.10);
+      detonate(at, t, hit.t, hit.normal);
+    } else if (hit) impacts.hit(at.toArray(), hit.normal, 0.16, 0.12, hotRing, 0.02);
+    player.pitch = Math.min(1.5, player.pitch + 0.0025);
+    return;
+  }
   if (t.ball) {
     const [r, density, speed] = t.ball;
     const from = eye.clone().addScaledVector(dir, 2.2);
@@ -2030,6 +2058,10 @@ function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: Arr
     hud.flash(Math.min(1, (t.radius * 6) / (distance + 5)));
     shake = Math.max(shake, Math.min(1.5, (t.radius * 6) / (distance + 6) + 0.25));
     view.glow = 1.2;
+  } else if (t.rifle) {
+    const broke = result.gone.length + result.loose.length;
+    impacts.hit(at.toArray(), normal ?? [0, 0, 1], 0.18, 0.15, broke ? dustRing : hotRing, 0.025);
+    effects.sparks(at.toArray(), 3, 4);
   } else if (t.name === 'Hammer') {
     // The blow: a thud with a crack and a ring of steel, a jolt, sparks off the head, a ring of
     // dust racing out over the face it struck, and a puff of it
@@ -2312,6 +2344,9 @@ function tick(now: number): void {
   const dt = screenshotPaused || rebuilding ? 0 : Math.max(0, Math.min((now - last) / 1000, 0.1));
   last = now;
   fps += (1 / Math.max(dt, 1e-3) - fps) * 0.05;
+  rifleMagazine.update(dt * timeScale, playing && tool === RIFLE && !driving);
+  // Clear the old reload pose before accepting the first shot from a refilled magazine.
+  hand.reload(tool === RIFLE && rifleMagazine.reloading ? rifleMagazine.reloadProgress : null);
   if (playing) {
     turn(dt);
     cooldown -= dt;
@@ -2438,6 +2473,7 @@ function tick(now: number): void {
   view.setFocus(zoomed ? focusAt + 2 : Math.max(block, Math.min(focusAt, 80)), zoomed ? 25 : 90, dofAmount);
   const pace = Math.hypot(player.velocity.x, player.velocity.y);
   hand.update(dt, player.walk, player.onGround ? Math.min(1, pace / 9) : 0, sprinting);
+  hud.setRifleAmmo(tool === RIFLE && !driving ? rifleMagazine.diagnostics : null);
   view.glow = Math.max(0.35, (view as unknown as { bloomPass: { strength: { value: number } } }).bloomPass.strength.value - dt * 1.5);
   const aim = castWorld(eye.toArray(), dir.toArray(), driving ? CAR_ROCKET.reach : TOOLS[tool].reach || 3);
   if (driving && car) hud.speed(car.speed * 3.6, boostLeft, car.gear, loaded.map((t) => Math.max(0, Math.min(1, 1 - (t - simTime) / RELOAD))), car.health);
@@ -2472,6 +2508,7 @@ function tick(now: number): void {
   shards.update(sim);
   effects.update(sim, cam);
   blastDetails?.update(sim, cam);
+  rifleTraces.update(sim);
   sky.update(cam, now / 1000);
   view.heatClock.value = simTime;
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
@@ -2559,6 +2596,7 @@ if (testing) Object.assign(window, {
     get urbanProps() { return urbanProps; },
     get urbanChain() { return urbanChain; },
     get blastDetails() { return blastDetails; },
+    get rifle() { return rifleMagazine; },
     get jobs() { return cityJobs; },
     get life() { return cityLife; },
     get ambience() { return cityAmbience; },
@@ -2596,6 +2634,7 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       urbanProps: urbanProps?.diagnostics ?? null,
       urbanChain: urbanChain?.diagnostics ?? null,
       blastDetails: blastDetails?.diagnostics ?? null,
+      rifle: { ...rifleMagazine.diagnostics, traces: rifleTraces.diagnostics },
       staticBuildings: cityBuildings.length,
       ambience: cityAmbience?.diagnostics ?? null,
       cityLife: cityLife?.diagnostics ?? null,
@@ -2620,6 +2659,8 @@ addEventListener('pagehide', () => {
   streetDetails?.dispose();
   urbanProps?.dispose();
   blastDetails?.dispose();
+  rifleTraces.dispose();
+  hand.dispose();
   (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy();
 });
 addEventListener('pageshow', (e) => {

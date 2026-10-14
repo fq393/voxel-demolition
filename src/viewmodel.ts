@@ -1,8 +1,9 @@
 // The tool in hand, drawn in front of the camera: a sledgehammer, a laser, a rocket tube, a
-// detonator, a wrecking ball on a chain. Simple shapes, lit like the world; it sways against
+// detonator, a wrecking ball on a chain, and an AK-style rifle. Lit like the world; it sways against
 // the mouse, bobs with each step, dips while sprinting and kicks (or swings) when used.
 
 import * as THREE from 'three/webgpu';
+import { buildAKModel } from './ak-model.ts';
 
 const metal = (c: number, rough = 0.35) => new THREE.MeshStandardMaterial({ color: c, metalness: 0.85, roughness: rough });
 const matte = (c: number, rough = 0.7) => new THREE.MeshStandardMaterial({ color: c, metalness: 0, roughness: rough });
@@ -68,7 +69,9 @@ function models(): THREE.Group[] {
   const ball = new THREE.Group();
   ball.add(part(new THREE.SphereGeometry(0.16, 24, 16), metal(0x2e3034, 0.5), 0, 0.1, -0.3));
   ball.add(part(new THREE.TorusGeometry(0.03, 0.008, 8, 16), metal(0x6a6a6a), 0, 0.28, -0.3, 0, Math.PI / 2));
-  return [hammer, blaster, rocket, charge, ball];
+  const tools = [hammer, blaster, rocket, charge, ball, buildAKModel()];
+  ['hammer', 'laser', 'rocket', 'detonator', 'wrecking-ball', 'AK47'].forEach((name, i) => { tools[i].name = name; });
+  return tools;
 }
 
 /** The hammer's swing (s): wind-up, blow, recovery. */
@@ -83,6 +86,15 @@ export class ViewModel {
   private kick = 0;
   private sway = new THREE.Vector2();
   private raise = 1;
+  private rifleFlash = 0;
+  private rifleFlashFresh = false;
+  private readonly flash = this.tools[5].getObjectByName('rifle-flash')!;
+  private reloadProgress: number | null = null;
+  private readonly rifleMagazine = this.tools[5].getObjectByName('rifle-magazine')!;
+  private readonly rifleRibs = [1, 2, 3].map(i => this.tools[5].getObjectByName(`rifle-magazine-rib-${i}`)!);
+  private readonly buttonLit = BUTTON_LIT.clone();
+  private readonly buttonDark = BUTTON_DARK.clone();
+  private disposed = false;
 
   constructor() {
     for (const t of this.tools) {
@@ -90,14 +102,17 @@ export class ViewModel {
       this.object.add(t);
     }
     this.tools[0].visible = true;
+    (this.tools[3].getObjectByName('button') as THREE.Mesh).material = this.buttonLit;
   }
 
   select(i: number): void {
+    if (this.disposed || !Number.isInteger(i) || i < 0 || i >= this.tools.length) return;
     if (i === this.current) return;
     this.tools[this.current].visible = false;
     this.current = i;
     this.tools[i].visible = true;
     this.raise = 1;
+    this.rifleFlash = 0; this.flash.visible = false; this.reload(null);
   }
 
   /**
@@ -105,10 +120,31 @@ export class ViewModel {
    * `ready` s), a kick for the rest.
    */
   use(ready = 0): void {
+    if (this.disposed) return;
+    if (this.current === 5 && this.reloadProgress !== null) return;
     if (this.current === 3) {
       this.press = 0;
       this.rearm = ready;
-    } else this.kick = 1;
+    } else {
+      this.kick = 1;
+      if (this.current === 5) { this.rifleFlash = .05; this.rifleFlashFresh = true; this.flash.visible = true; }
+    }
+  }
+
+  /** Normalised reload time; null clears the pose when the game cancels or completes a reload. */
+  reload(progress: number | null): void {
+    this.reloadProgress = progress !== null && Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : null;
+    if (this.reloadProgress === null) {
+      this.rifleMagazine.visible = true;
+      this.rifleRibs.forEach(rib => { rib.visible = true; });
+    } else { this.rifleFlash = 0; this.flash.visible = false; }
+  }
+  /** World rebuild clears transient weapon presentation without changing the selected tool. */
+  reset(): void {
+    this.kick = this.stopped = this.rifleFlash = 0;
+    this.rifleFlashFresh = this.firing = false;
+    this.flash.visible = false;
+    this.reload(null);
   }
   /** The detonator: seconds since its button was pressed, and until it's armed again (lit). */
   private press = Infinity;
@@ -126,9 +162,9 @@ export class ViewModel {
   /** Seconds from starting a swing to the hammer landing (the blow lands then). */
   static readonly STRIKE = 0.12;
 
-  /** Where the laser's beam leaves the barrel (world m). */
-  muzzle(out: THREE.Vector3): THREE.Vector3 {
-    const m = this.tools[1].getObjectByName('muzzle')!;
+  /** Laser muzzle by default; tool 5 returns the rifle muzzle, both in world metres. */
+  muzzle(out: THREE.Vector3, tool = 1): THREE.Vector3 {
+    const m = tool === 5 ? this.tools[5].getObjectByName('rifle-muzzle')! : this.tools[1].getObjectByName('muzzle')!;
     m.updateWorldMatrix(true, false);
     return m.getWorldPosition(out);
   }
@@ -141,6 +177,11 @@ export class ViewModel {
 
   /** Place it for this frame: walking phase (radians), speed share (0..1), sprinting. */
   update(dt: number, walk: number, speed: number, sprint: boolean): void {
+    if (this.disposed) return;
+    // This frame's elapsed time predates a shot created inside that frame.
+    if (this.rifleFlashFresh) this.rifleFlashFresh = false;
+    else this.rifleFlash = Math.max(0, this.rifleFlash - dt);
+    this.flash.visible = this.current === 5 && this.rifleFlash > 0 && this.reloadProgress === null;
     // The hammer's swing takes SWING s (held still a beat on the blow); the rest kick back briefly
     this.stopped = Math.max(0, this.stopped - dt);
     if (!this.stopped) this.kick = Math.max(0, this.kick - dt * (this.current === 0 ? 1 / SWING : 6));
@@ -168,8 +209,8 @@ export class ViewModel {
       t.position.y += lean * 0.12;
       t.position.x -= lean * 0.17;
     } else {
-      t.rotation.set(this.kick * 0.25 + this.sway.y * 0.1 - run * 0.5, this.sway.x * 0.15 + run * 0.6, 0);
-      t.position.z += this.kick * 0.06;
+      t.rotation.set(this.kick * (this.current === 5 ? .08 : .25) + this.sway.y * 0.1 - run * 0.5, this.sway.x * 0.15 + run * 0.6, 0);
+      t.position.z += this.kick * (this.current === 5 ? .026 : .06);
       if (this.current === 3) {
         // A thumb pressing the button: the remote tips forward and rolls a touch as it goes in,
         // then eases back; the button sinks and goes dark, and lights again once armed
@@ -180,13 +221,35 @@ export class ViewModel {
         t.position.y -= tip * 0.012;
         const button = t.getObjectByName('button') as THREE.Mesh;
         button.position.y = 0.028 - tip * 0.009;
-        button.material = this.rearm > 0 ? BUTTON_DARK : BUTTON_LIT;
+        button.material = this.rearm > 0 ? this.buttonDark : this.buttonLit;
       }
       if (this.current === 1 && this.firing) {
         t.position.x += (Math.random() - 0.5) * 0.004;
         t.position.y += (Math.random() - 0.5) * 0.004;
         t.position.z += 0.012;
       }
+      if (this.current === 5 && this.reloadProgress !== null) {
+        const progress = this.reloadProgress;
+        const dip = Math.sin(progress * Math.PI);
+        t.position.y -= dip * .11; t.position.x -= dip * .045;
+        t.rotation.z += dip * .28; t.rotation.y -= dip * .13;
+        const magazineOut = progress > .28 && progress < .62;
+        this.rifleMagazine.visible = !magazineOut;
+        this.rifleRibs.forEach(rib => { rib.visible = !magazineOut; });
+      }
     }
+  }
+
+  /** Every model resource is owned by this viewmodel; shared parts dispose exactly once. */
+  dispose(): void {
+    if (this.disposed) return;
+    const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>([this.buttonLit, this.buttonDark]);
+    this.object.traverse(child => {
+      if (!(child instanceof THREE.Mesh)) return;
+      geometries.add(child.geometry);
+      for (const material of Array.isArray(child.material) ? child.material : [child.material]) materials.add(material);
+    });
+    for (const geometry of geometries) geometry.dispose(); for (const material of materials) material.dispose();
+    this.object.removeFromParent(); this.object.clear(); this.flash.visible = false; this.disposed = true;
   }
 }

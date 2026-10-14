@@ -715,6 +715,11 @@ export class CityPhysics {
     return slot;
   }
 
+  /** Resize the one city vehicle in place; garage swaps must not consume new proxy slots. */
+  resizeVehicle(slot: number, size: readonly number[], at: ArrayLike<number>): void {
+    this.solver.rewriteFixed([slot], at, [...size], 0.6);
+  }
+
   /**
    * The vehicle in `slot` is at `at` turned by `q` (xyzw) now, moving at `v` and turning at `w`
    * (rad/s about each axis): the step advances it by them, so it's where the CPU will have it

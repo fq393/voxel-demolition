@@ -69,3 +69,10 @@ test('parallel rays, starts inside/on a face and zero direction have stable slab
   assert.equal(firstStaticHit(boxes, [6, 0, 1], [1, 0, 0], 20), null);
   assert.equal(firstStaticHit(boxes, [0, 0, 1], [1, 0, 0], -1), null);
 });
+
+
+test('tall cargo vehicles collide with overhead scenery above the sedan roof',()=>{
+  const overhead=[{minX:-3,maxX:3,minY:-2,maxY:2,minZ:1.8,maxZ:2.3}];
+  assert.equal(overlapsVehicle(overhead,0,0,0,2.25,1,1.62),false);
+  assert.equal(overlapsVehicle(overhead,0,0,0,2.5625,1.0625,2.245),true);
+});

@@ -2,7 +2,7 @@
 export interface Pose2 { x: number; y: number; heading: number }
 export interface RoadBody extends Pose2 { halfLength?: number; halfWidth?: number }
 export interface LifeFrame {
-  car: (Pose2 & { speed: number }) | null;
+  car: (RoadBody & { speed: number }) | null;
   player: { x: number; y: number; z: number; driving: boolean };
 }
 export type StopReason = 'none' | 'signal' | 'following' | 'pedestrian' | 'player' | 'world';
@@ -173,7 +173,7 @@ export class StreetSimulation {
     state.time += dt;
     state.signalPhase = trafficSignal(state.time);
     this.playerBody.x = frame.player.x; this.playerBody.y = frame.player.y;
-    if (frame.car) { this.vehicleBody.x = frame.car.x; this.vehicleBody.y = frame.car.y; this.vehicleBody.heading = frame.car.heading; }
+    if (frame.car) { this.vehicleBody.x = frame.car.x; this.vehicleBody.y = frame.car.y; this.vehicleBody.heading = frame.car.heading; this.vehicleBody.halfLength = frame.car.halfLength ?? 2.3; this.vehicleBody.halfWidth = frame.car.halfWidth ?? 1; }
     for (const car of state.cars) this.drive(car, dt, frame);
     for (const p of state.pedestrians) this.walk(p, dt, frame);
   }

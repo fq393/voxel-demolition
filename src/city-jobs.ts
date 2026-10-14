@@ -1,127 +1,141 @@
 import * as THREE from 'three/webgpu';
-import { CityJobState, CITY_JOBS, CLEANUP_ZONE, type CityJobId, type JobFrame } from './city-job-state.ts';
+import { loadCityProgress, saveCityProgress, type CityProgress, type CityPose, type ProgressStorage } from './city-progress.ts';
+import type { CleanupZone, ContractFrame } from './city-contracts.ts';
+import { VEHICLES, type VehicleId } from './vehicle-spec.ts';
 import { State, type City } from './world.ts';
 
+const ZONES = [
+  {id:'west-corner',name:'西南街角',position:[-12,-13.6] as const},
+  {id:'west-bench',name:'西侧人行道',position:[-13.6,7.2] as const},
+  {id:'bus-stop',name:'南边公交站',position:[11,-15.6] as const},
+];
 const CSS = `
-.city-jobs {position:fixed;left:calc(env(safe-area-inset-left) + 14px);top:calc(env(safe-area-inset-top) + 64px);z-index:4;width:236px;padding:10px 12px;box-sizing:border-box;border-left:3px solid #9cccba;border-radius:0 8px 8px 0;background:#162321e8;color:#f4e7ce;font:11px/1.4 system-ui,sans-serif;pointer-events:none;}
-.city-jobs[hidden] {display:none;}
-.city-jobs .cj-heading {display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;}
-.city-jobs .cj-badges {color:#edc785;font-size:10px;white-space:nowrap;}
-.city-jobs .cj-note {margin:5px 0 8px;color:#c8d8ca;min-height:15px;}
-.city-jobs .cj-progress {color:#f1cb83;font-size:10px;min-height:14px;}
-.city-jobs button,.cj-menu button {min-height:44px;border:1px solid #779b8550;border-radius:6px;background:#30483b;color:#f4e7ce;font:600 11px system-ui;cursor:pointer;touch-action:manipulation;}
-.city-jobs button {pointer-events:auto;width:100%;margin-top:5px;}
-.city-jobs button:hover,.cj-menu button:hover {border-color:#edc785;}
-.city-jobs button:focus-visible,.cj-menu button:focus-visible {outline:2px solid #edc785;outline-offset:2px;}
-.cj-menu {margin:12px 0;border-top:1px solid #ffffff20;padding-top:10px;}
-.cj-menu .cj-menu-heading {font-size:12px;color:#edc785;margin:0 0 8px;}
-.cj-menu .cj-options {display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
-.cj-menu button {padding:7px 3px;}
-.cj-menu button[aria-pressed=true] {border-color:#edc785;background:#514125;}
-.cj-menu button:disabled {opacity:.45;cursor:default;}
-.cj-menu small {display:block;margin-top:7px;font-size:11px;color:#c8d8ca;}
-body.city-jobs-active:not(.touch) .hud .keys {top:212px;}
-@media(orientation:portrait) and (max-width:680px) {.city-jobs {top:calc(env(safe-area-inset-top) + 150px);width:236px;padding:8px 10px;} .city-jobs .cj-note {margin:3px 0 4px;font-size:10px;} body.city-jobs-active .city-guide {top:calc(env(safe-area-inset-top) + 288px);}}
-@media(orientation:landscape) {body.touch .city-jobs {width:230px;} body.touch.city-jobs-active .city-guide {left:calc(env(safe-area-inset-left) + 250px);width:178px;grid-template-columns:64px 88px;gap:8px;} body.touch.city-jobs-active .city-guide .cg-status,body.touch.city-jobs-active .city-guide .cg-map-note {display:none;} body.touch.city-jobs-active .city-guide .cg-legend {gap:4px;font-size:7px;} body.touch.city-jobs-active .city-guide .cg-heading {font-size:8px;}}
-@media(max-height:640px) and (min-width:681px) {body.city-jobs-active:not(.touch) .hud .keys {display:none;}}
+.city-jobs{position:fixed;left:calc(env(safe-area-inset-left) + 14px);top:calc(env(safe-area-inset-top) + 64px);z-index:4;width:236px;padding:10px 12px;box-sizing:border-box;border-left:3px solid #9cccba;border-radius:0 8px 8px 0;background:#162321e8;color:#f4e7ce;font:11px/1.4 system-ui,sans-serif;pointer-events:none}
+.city-jobs[hidden]{display:none}.city-jobs .cj-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px}.cj-coins{color:#edc785;font-variant-numeric:tabular-nums;white-space:nowrap}.city-jobs .cj-note{margin:5px 0 8px;color:#c8d8ca;min-height:15px}.city-jobs .cj-progress{color:#f1cb83;font-size:10px;min-height:14px}
+.city-jobs button,.cj-menu button{min-height:44px;border:1px solid #779b8550;border-radius:6px;background:#30483b;color:#f4e7ce;font:600 11px system-ui;cursor:pointer;touch-action:manipulation}.city-jobs button{pointer-events:auto;width:100%;margin-top:5px}.city-jobs button:hover,.cj-menu button:hover{border-color:#edc785}.city-jobs button:focus-visible,.cj-menu button:focus-visible{outline:2px solid #edc785;outline-offset:2px}.cj-menu button:disabled{opacity:.5;cursor:default}
+.menu:has(.cj-menu){padding-top:64px;padding-bottom:16px}
+.cj-menu{margin:12px 0;border-top:1px solid #ffffff20;padding-top:10px}.cj-menu .cj-tabs{display:flex;gap:6px;align-items:center;margin-bottom:10px}.cj-menu .cj-tabs button{padding:0 12px}.cj-menu button[aria-pressed=true]{border-color:#edc785;background:#514125}.cj-menu .cj-options{display:grid;gap:6px}.cj-menu .cj-offer{display:grid;grid-template-columns:1fr auto;gap:3px 12px;text-align:left;padding:9px 11px}.cj-offer small{grid-column:1/-1;color:#c8d8ca;font-weight:400;font-size:10px}.cj-menu .cj-wallet{margin-left:auto;font-size:12px;color:#edc785;white-space:nowrap}.cj-menu .cj-actions{display:flex;gap:6px;margin-top:6px}.cj-actions button{flex:1}.cj-menu .cj-save{display:block;margin-top:8px;font-size:10px;line-height:1.5;color:#a9bcb0}.cj-menu .cj-save[data-error=true]{color:#ffb99b}.cj-menu .cj-garage[hidden],.cj-menu .cj-options[hidden]{display:none}
+.cj-vehicle{display:grid;grid-template-columns:70px 1fr auto;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid #ffffff15}.cj-vehicle svg{width:70px;height:40px}.cj-vehicle strong{font-size:12px}.cj-vehicle small{display:block;color:#bdcfc2;font-size:10px;margin-top:3px;line-height:1.4}.cj-vehicle button{padding:0 10px;min-width:80px}.cj-menu .cj-caption{font-size:10px;color:#bdcfc2;margin:8px 0 0}.cj-menu .cj-description{font-size:11px;color:#f1cb83;margin:8px 0 0}
+body.city-jobs-active:not(.touch) .hud .keys{top:218px}@media(orientation:portrait) and (max-width:680px){.city-jobs{top:calc(env(safe-area-inset-top) + 150px);width:236px;padding:8px 10px}.city-jobs .cj-note{margin:3px 0 4px;font-size:10px}body.city-jobs-active .city-guide{top:calc(env(safe-area-inset-top) + 294px)}.cj-vehicle{grid-template-columns:54px 1fr auto;gap:5px}.cj-vehicle svg{width:54px}.cj-vehicle button{min-width:72px;padding:0 6px}}
+@media(orientation:landscape){body.touch .city-jobs{width:230px}body.touch.city-jobs-active .city-guide{left:calc(env(safe-area-inset-left) + 250px);width:178px;grid-template-columns:64px 88px;gap:8px}body.touch.city-jobs-active .city-guide .cg-status,body.touch.city-jobs-active .city-guide .cg-map-note{display:none}body.touch.city-jobs-active .city-guide .cg-legend{gap:4px;font-size:7px}body.touch.city-jobs-active .city-guide .cg-heading{font-size:8px}}
+@media(max-height:640px) and (min-width:681px){body.city-jobs-active:not(.touch) .hud .keys{display:none}}
 `;
+function button(text:string,action:()=>void):HTMLButtonElement {
+  const b=document.createElement('button');b.type='button';b.textContent=text;b.addEventListener('click',()=>{b.blur();action();});return b;
+}
+function vehicleIcon(id:VehicleId):string {
+  const body=id==='sedan'?'M6 27L10 19H24L32 10H49L60 21L66 24V32H6Z':id==='pickup'?'M5 18H30L33 11H46L54 22H66V32H5Z':'M5 10H49L59 20H66V32H5Z';
+  const color=id==='sedan'?'#c97864':id==='pickup'?'#d8b47f':'#83b4a6';
+  return `<svg viewBox="0 0 72 42" aria-hidden="true"><path d="${body}" fill="${color}" stroke="#f4e7ce" stroke-width="1"/><path d="M35 13H46L53 21H32Z" fill="#507e83"/><path d="M8 29H65" stroke="#35454a"/><circle cx="17" cy="32" r="6" fill="#263435"/><circle cx="56" cy="32" r="6" fill="#263435"/><circle cx="17" cy="32" r="3" fill="#c6cfc3"/><circle cx="56" cy="32" r="3" fill="#c6cfc3"/></svg>`;
+}
 
-/** Optional sandbox tasks. Completion badges never alter ranked demolition scores. */
+/** Sandbox contracts and garage share one versioned progression save, separate from rankings. */
 export class CityJobs {
-  readonly state: CityJobState;
-  readonly object = new THREE.Group();
-  private readonly root = document.createElement('aside');
-  private readonly name = document.createElement('strong');
-  private readonly badges = document.createElement('span');
-  private readonly note = document.createElement('div');
-  private readonly progress = document.createElement('div');
-  private readonly choose = document.createElement('button');
-  private readonly ringMaterial = new THREE.MeshBasicMaterial({color:0x9de0c4,transparent:true,opacity:0.65,side:THREE.DoubleSide,depthWrite:false});
-  private readonly ring = new THREE.Mesh(new THREE.RingGeometry(2.8,3.05,48),this.ringMaterial);
-  private readonly beacon = new THREE.Group();
-  private readonly materials: THREE.Material[] = [this.ringMaterial];
-  private readonly geometries: THREE.BufferGeometry[] = [this.ring.geometry];
-  private readonly storageKey: string;
-  private city: City;
-  private watch: number[] = [];
-  private counted = new Set<number>();
-  private demolished = 0;
-  private scanElapsed = 0;
-  private clock = 0;
-  private menu: HTMLElement | null = null;
-  private menuNote: HTMLElement | null = null;
-  private eligible = true;
-  private lastPaint = '';
-  private readonly onChoose: () => void;
-  private readonly onFeedback: (text:string,complete:boolean) => void;
-
-  constructor(city:City,playerId:string,onChoose:()=>void,onFeedback:(text:string,complete:boolean)=>void) {
-    this.city=city;this.storageKey=`city.jobs.${playerId}`;this.onChoose=onChoose;this.onFeedback=onFeedback;
-    let saved:string[]=[];
-    try {const data:unknown=JSON.parse(localStorage.getItem(this.storageKey)??'[]');if(Array.isArray(data)) saved=data.filter((v):v is string=>typeof v==='string');}catch {/* fresh badges */}
-    this.state=new CityJobState(saved);
+  readonly progressState:CityProgress;
+  readonly object=new THREE.Group();
+  private readonly root=document.createElement('aside');
+  private readonly name=document.createElement('strong');
+  private readonly wallet=document.createElement('span');
+  private readonly note=document.createElement('div');
+  private readonly progressLabel=document.createElement('div');
+  private readonly choose:HTMLButtonElement;
+  private readonly ringMaterial=new THREE.MeshBasicMaterial({color:0x9de0c4,transparent:true,opacity:.65,side:THREE.DoubleSide,depthWrite:false});
+  private readonly ring=new THREE.Mesh(new THREE.RingGeometry(2.8,3.05,48),this.ringMaterial);
+  private readonly beacon=new THREE.Group();
+  private readonly materials:THREE.Material[]=[this.ringMaterial];
+  private readonly geometries:THREE.BufferGeometry[]=[this.ring.geometry];
+  private readonly storageKeyId:string;
+  private readonly storage:ProgressStorage;
+  private city:City;
+  private readonly watch=new Map<string,number[]>();
+  private readonly counted=new Map<string,Set<number>>();
+  private scanElapsed=0;private clock=0;private eligible=true;
+  private menu:HTMLElement|null=null;private offers:HTMLElement|null=null;private garage:HTMLElement|null=null;
+  private menuWallet:HTMLElement|null=null;private saveNote:HTMLElement|null=null;private description:HTMLElement|null=null;
+  private tab:'jobs'|'garage'='jobs';private lastPaint='';private saved=true;private lastComplete='';
+  private readonly onChoose:()=>void;
+  private readonly onFeedback:(text:string,complete:boolean)=>void;
+  private readonly onVehicleChange:(id:VehicleId)=>boolean;
+  constructor(city:City,playerId:string,onChoose:()=>void,onFeedback:(text:string,complete:boolean)=>void,onVehicleChange:(id:VehicleId)=>boolean) {
+    this.onChoose=onChoose;this.onFeedback=onFeedback;this.onVehicleChange=onVehicleChange;
+    this.city=city;this.storageKeyId=playerId;this.buildWatch();
+    try { this.storage=localStorage; } catch { this.storage={getItem:()=>{throw new Error('storage unavailable');},setItem:()=>{throw new Error('storage unavailable');}}; }
+    const loaded=loadCityProgress(this.storage,playerId,this.zones());this.progressState=loaded.progress;
+    this.progressState.rebaseCleanup(this.demolished());this.saved=loaded.status!=='unavailable';
     const style=document.createElement('style');style.textContent=CSS;document.head.append(style);
-    this.root.className='city-jobs';this.root.hidden=true;this.root.setAttribute('aria-label','街区小任务');
-    const heading=document.createElement('div');heading.className='cj-heading';this.badges.className='cj-badges';heading.append(this.name,this.badges);
-    this.note.className='cj-note';this.progress.className='cj-progress';this.choose.type='button';
-    this.choose.addEventListener('click',e=>{e.stopPropagation();this.choose.blur();this.onChoose();});
+    this.root.className='city-jobs';this.root.hidden=true;this.root.setAttribute('aria-label','城市委托与金币');
+    const heading=document.createElement('div');heading.className='cj-heading';this.wallet.className='cj-coins';heading.append(this.name,this.wallet);
+    this.note.className='cj-note';this.progressLabel.className='cj-progress';this.choose=button('委托 / 车库 · G',this.onChoose);
     for(const kind of ['pointerdown','pointerup','mousedown','mouseup'])this.root.addEventListener(kind,e=>e.stopPropagation());
-    this.root.append(heading,this.note,this.progress,this.choose);document.body.append(this.root);
-    this.object.name='city-task-target';this.object.visible=false;this.ring.position.z=0.035;this.object.add(this.ring,this.beacon);
-    const box=new THREE.BoxGeometry(0.7,0.7,0.7);const trim=new THREE.BoxGeometry(0.73,0.12,0.73);
-    const parcel=new THREE.MeshStandardMaterial({color:0xd3a66c,roughness:0.85});const ribbon=new THREE.MeshStandardMaterial({color:0xf6e7bc,roughness:0.7});
+    this.root.append(heading,this.note,this.progressLabel,this.choose);document.body.append(this.root);
+    this.object.name='city-task-target';this.object.visible=false;this.ring.position.z=.035;this.object.add(this.ring,this.beacon);
+    const box=new THREE.BoxGeometry(.7,.7,.7),trim=new THREE.BoxGeometry(.73,.12,.73);
+    const parcel=new THREE.MeshStandardMaterial({color:0xd3a66c,roughness:.85}),ribbon=new THREE.MeshStandardMaterial({color:0xf6e7bc,roughness:.7});
     this.materials.push(parcel,ribbon);this.geometries.push(box,trim);
-    const body=new THREE.Mesh(box,parcel);body.castShadow=true;
-    const strip=new THREE.Mesh(trim,ribbon);const strip2=new THREE.Mesh(trim,ribbon);strip2.rotation.z=Math.PI/2;
-    this.beacon.add(body,strip,strip2);this.reset(city);
+    const body=new THREE.Mesh(box,parcel);body.castShadow=true;const strip=new THREE.Mesh(trim,ribbon),strip2=new THREE.Mesh(trim,ribbon);strip2.rotation.z=Math.PI/2;this.beacon.add(body,strip,strip2);
+    this.persist();this.paint();
   }
+  get state(){const a=this.progressState.active;return {active:a?.contract.type??null,stage:a?.stage??0,progress:a?.progress??0,complete:!!this.lastComplete&&!a,target:this.progressState.target};}
+  get pose():CityPose|null{return this.progressState.pose;}
   mountMenu(menu:HTMLElement):void {
     this.menu=document.createElement('section');this.menu.className='cj-menu';
-    const label=document.createElement('p');label.className='cj-menu-heading';label.textContent='街区小任务 · 自由模式';
-    const options=document.createElement('div');options.className='cj-options';
-    for(const job of CITY_JOBS){const b=document.createElement('button');b.type='button';b.dataset.job=job.id;b.textContent=job.name;b.addEventListener('click',()=>{b.blur();this.start(job.id);});options.append(b);}
-    const cancel=document.createElement('button');cancel.type='button';cancel.textContent='暂时不接任务';cancel.style.gridColumn='1 / -1';cancel.addEventListener('click',()=>{cancel.blur();this.cancel();});options.append(cancel);
-    this.menuNote=document.createElement('small');this.menu.append(label,options,this.menuNote);
-    menu.querySelector('.buttons')?.before(this.menu);this.lastPaint='';this.paint();
+    const tabs=document.createElement('div');tabs.className='cj-tabs';
+    for(const [id,label] of [['jobs','街区委托'],['garage','我的车库']] as const){const b=button(label,()=>{this.tab=id;this.paint(true);});b.dataset.tab=id;tabs.append(b);}
+    this.menuWallet=document.createElement('strong');this.menuWallet.className='cj-wallet';tabs.append(this.menuWallet);
+    this.offers=document.createElement('div');this.offers.className='cj-options';this.garage=document.createElement('div');this.garage.className='cj-garage';
+    for(const spec of VEHICLES){const row=document.createElement('div');row.className='cj-vehicle';row.innerHTML=vehicleIcon(spec.id);const copy=document.createElement('div'),name=document.createElement('strong'),info=document.createElement('small');name.textContent=spec.name;info.textContent=spec.description;copy.append(name,info);const b=button('',()=>this.chooseVehicle(spec.id));b.dataset.vehicle=spec.id;row.append(copy,b);this.garage.append(row);}
+    const caption=document.createElement('p');caption.className='cj-caption';caption.textContent='选车后交到街边停车位 · 已购车辆可免费切换';this.garage.append(caption);
+    this.description=document.createElement('p');this.description.className='cj-description';this.saveNote=document.createElement('small');this.saveNote.className='cj-save';
+    this.menu.append(tabs,this.offers,this.garage,this.description,this.saveNote);menu.querySelector('.buttons')?.before(this.menu);this.paint(true);
   }
-  start(id:CityJobId):boolean {
-    if(!this.eligible)return false;
-    this.scan();
-    if(!this.state.start(id,this.demolished,this.watch.length-this.demolished)){this.onFeedback('街角已经清空了，按 R 重建后再试',false);return false;}
-    this.onFeedback(`${CITY_JOBS.find(job=>job.id===id)!.name} · 跟着绿色标记走`,false);this.lastPaint='';this.paint();return true;
+  start(id:string):boolean {
+    if(!this.eligible)return false;this.scan();this.progressState.setCleanupZones(this.zones());
+    const offer=this.progressState.offers.find(j=>j.id===id)??this.progressState.offers.find(j=>j.type===id);
+    if(!offer||!this.progressState.acceptContract(offer.id,this.demolished(offer.cleanupZoneId))){this.onFeedback('先完成或取消当前委托；清空的街角可按 R 重建',false);return false;}
+    this.lastComplete='';this.persist();this.onFeedback(`${offer.name} · 完成可得 ${offer.reward} 金币`,false);this.paint(true);return true;
   }
-  cancel():void {this.state.cancel();this.lastPaint='';this.paint();}
-  reset(city:City):void {
-    this.city=city;this.watch=[];this.counted.clear();this.demolished=this.scanElapsed=0;
-    for(let i=0;i<city.count;i++){const x=city.position[3*i],y=city.position[3*i+1],z=city.position[3*i+2];if(Math.hypot(x-CLEANUP_ZONE[0],y-CLEANUP_ZONE[1])<=4&&z<5)this.watch.push(i);}
-    this.state.restart(this.watch.length);this.lastPaint='';this.paint();
+  cancel():void {this.progressState.cancelContract();this.lastComplete='';this.persist();this.paint(true);}
+  private chooseVehicle(id:VehicleId):void {
+    if(!this.eligible)return;
+    const result=this.progressState.purchase(id);
+    if(result==='insufficient'){this.onFeedback('金币还不够，完成几单委托再来',false);return;}
+    if(result==='invalid')return;
+    if(this.progressState.selected!==id){if(this.onVehicleChange(id)){this.progressState.selectVehicle(id);this.onFeedback('车辆已停在街边 · 继续游戏后按 F 上车',false);}}
+    else if(result==='owned')this.onFeedback('这辆车已经在使用中',false);
+    this.persist();this.paint(true);
   }
-  setEligible(value:boolean):void {this.eligible=value;this.paint();}
-  update(dt:number,active:boolean,frame:Omit<JobFrame,'demolished'>):void {
-    this.root.hidden=!active||!this.eligible;document.body.classList.toggle('city-jobs-active',!this.root.hidden);
-    this.object.visible=active&&this.eligible&&!!this.state.target;
+  reset(city:City):void {this.city=city;this.buildWatch();this.progressState.setCleanupZones(this.zones());this.progressState.rebaseCleanup(this.demolished());this.persist();this.paint(true);}
+  setEligible(value:boolean):void {if(value&&!this.eligible){this.scan();this.progressState.setCleanupZones(this.zones());this.progressState.rebaseCleanup(this.demolished());this.persist();}this.eligible=value;this.paint(true);}
+  savePose(pose:CityPose):void {if(!this.eligible)return;this.progressState.capturePose(pose);this.persist();}
+  update(dt:number,active:boolean,frame:Omit<ContractFrame,'demolished'>):void {
+    this.root.hidden=!active||!this.eligible;document.body.classList.toggle('city-jobs-active',!this.root.hidden);this.object.visible=active&&this.eligible&&!!this.state.target;
     if(!active||!this.eligible)return;
-    this.clock+=dt;this.scanElapsed+=dt;if(this.scanElapsed>=0.25){this.scan();this.scanElapsed=0;}
-    if(this.state.update({...frame,demolished:this.demolished})){
-      try {localStorage.setItem(this.storageKey,JSON.stringify([...this.state.badges]));}catch {/* badges still live for this session */}
-      this.onFeedback(`${CITY_JOBS.find(job=>job.id===this.state.active)!.name}完成 · 街区徽章 ${this.state.badges.size}/3`,true);
-    }
-    const target=this.state.target;if(target){this.object.position.set(target[0],target[1],0);this.beacon.position.z=2.25+Math.sin(this.clock*2.8)*0.15;this.beacon.rotation.z=this.clock*0.5;this.ring.rotation.z=this.clock*0.1;this.ring.scale.setScalar(this.state.active==='cleanup'?1.32:1);}
+    this.clock+=dt;this.scanElapsed+=dt;if(this.scanElapsed>=.25){this.scan();this.progressState.setCleanupZones(this.zones());this.scanElapsed=0;}
+    const previous=this.progressState.active,previousStage=previous?.stage,previousProgress=previous?.progress;
+    const result=this.progressState.advanceContract({...frame,demolished:this.demolished()});
+    if(result){this.lastComplete=`${result.contract.name}完成 · +${result.reward} 金币`;this.progressState.setCleanupZones(this.zones());this.persist();this.onFeedback(this.lastComplete,true);}
+    else if(previousStage!==this.progressState.active?.stage||previousProgress!==this.progressState.active?.progress)this.persist();
+    const target=this.state.target;if(target){this.object.position.set(target[0],target[1],0);this.beacon.position.z=2.25+Math.sin(this.clock*2.8)*.15;this.beacon.rotation.z=this.clock*.5;this.ring.rotation.z=this.clock*.1;this.ring.scale.setScalar(this.state.active==='cleanup'?1.32:1);}
     this.object.visible=active&&!!target;this.paint();
   }
-  get diagnostics():{active:CityJobId|null;stage:number;progress:number;complete:boolean;badges:CityJobId[];regionVoxels:number;demolished:number} {
-    return {active:this.state.active,stage:this.state.stage,progress:this.state.progress,complete:this.state.complete,badges:[...this.state.badges],regionVoxels:this.watch.length,demolished:this.demolished};
-  }
+  get diagnostics(){const a=this.progressState.active;return {...this.state,coins:this.progressState.coins,owned:this.progressState.owned,selected:this.progressState.selected,completed:this.progressState.completed,badges:this.progressState.badges,offers:this.progressState.offers,contract:a,regionVoxels:this.watch.get(a?.contract.cleanupZoneId??ZONES[0].id)?.length??0,demolished:this.demolished(),saveOK:this.saved};}
   dispose():void {this.root.remove();this.menu?.remove();for(const g of this.geometries)g.dispose();for(const m of this.materials)m.dispose();}
-  private scan():void {for(const v of this.watch)if(this.city.state[v]!==State.Fixed)this.counted.add(v);this.demolished=this.counted.size;}
-  private paint():void {
-    const key=`${this.state.active},${this.state.stage},${this.state.progress},${this.state.complete},${this.state.badges.size},${this.eligible}`;if(key===this.lastPaint)return;this.lastPaint=key;
-    this.name.textContent=this.state.active?CITY_JOBS.find(job=>job.id===this.state.active)!.name:'街区小任务';
-    this.badges.textContent=`徽章 ${this.state.badges.size}/3`;
-    this.note.textContent=this.state.active?this.state.instruction:'兜风、送包裹，或者清理街角';
-    this.progress.textContent=this.state.active&&!this.state.complete?`${this.state.progress} / ${this.state.goal} · 地图上找绿色菱形`:'不赶时间，想做哪件就做哪件';
-    this.choose.textContent=this.state.complete?'选下一件事 · G':'选择 / 更换任务 · G';
-    this.menu?.querySelectorAll<HTMLButtonElement>('button[data-job]').forEach(button=>{const id=button.dataset.job as CityJobId;button.disabled=!this.eligible;button.setAttribute('aria-pressed',String(this.state.active===id));button.textContent=`${this.state.badges.has(id)?'✓ ':''}${CITY_JOBS.find(job=>job.id===id)!.name}`;});
-    if(this.menuNote)this.menuNote.textContent=this.eligible?(this.state.active?CITY_JOBS.find(job=>job.id===this.state.active)!.description:'完成任务，收集三枚街区徽章。任务没有倒计时。'):'90 秒挑战专注拆除；自由模式可接小任务。';
+  private buildWatch():void {this.watch.clear();this.counted.clear();for(const zone of ZONES){const ids:number[]=[];for(let i=0;i<this.city.count;i++)if(Math.hypot(this.city.position[3*i]-zone.position[0],this.city.position[3*i+1]-zone.position[1])<=4&&this.city.position[3*i+2]<5)ids.push(i);this.watch.set(zone.id,ids);this.counted.set(zone.id,new Set());}this.scanElapsed=0;this.scan();}
+  private zones():CleanupZone[]{return ZONES.map(zone=>({...zone,remaining:(this.watch.get(zone.id)?.length??0)-(this.counted.get(zone.id)?.size??0)}));}
+  private demolished(id:string|null=this.progressState?.active?.contract.cleanupZoneId??ZONES[0].id):number{return id?this.counted.get(id)?.size??0:0;}
+  private scan():void {for(const [id,watch] of this.watch){const set=this.counted.get(id)!;for(const v of watch)if(this.city.state[v]!==State.Fixed)set.add(v);}}
+  private persist():void {this.saved=saveCityProgress(this.storage,this.storageKeyId,this.progressState).ok;this.paint();}
+  private paint(force=false):void {
+    const p=this.progressState,a=p.active;
+    const key=JSON.stringify([a,p.coins,p.selected,p.owned,p.completed,p.offers,this.eligible,this.tab,this.saved,this.lastComplete]);if(!force&&key===this.lastPaint)return;this.lastPaint=key;
+    this.name.textContent=a?a.contract.name:'城市委托';this.wallet.textContent=`◉ ${p.coins}`;
+    this.note.textContent=a?p.instruction:this.lastComplete||'接一单委托，攒金币换辆车';this.progressLabel.textContent=a?`${a.progress} / ${p.goal} · 奖励 ${a.contract.reward} 金币`:`已完成 ${p.completed} 单 · 随时自由逛城`;
+    this.choose.textContent='委托 / 车库 · G';
+    if(this.menuWallet)this.menuWallet.textContent=`◉ ${p.coins} 金币`;
+    this.menu?.querySelectorAll<HTMLButtonElement>('button[data-tab]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tab===this.tab)));
+    if(this.offers){this.offers.hidden=this.tab!=='jobs';this.offers.replaceChildren();for(const offer of p.offers){const b=button('',()=>this.start(offer.id));b.className='cj-offer';b.dataset.contract=offer.id;b.dataset.job=offer.type;const title=document.createElement('strong'),reward=document.createElement('span'),description=document.createElement('small');title.textContent=offer.name;reward.textContent=`+${offer.reward} ◉`;description.textContent=offer.description;b.append(title,reward,description);b.disabled=!this.eligible||!!a;b.setAttribute('aria-pressed',String(a?.contract.id===offer.id));this.offers.append(b);}const actions=document.createElement('div');actions.className='cj-actions';const cancel=button('取消当前委托',()=>this.cancel());cancel.disabled=!a||!this.eligible;const rotate=button('看看其他委托',()=>{this.scan();p.setCleanupZones(this.zones());if(p.rotateOffers()){this.persist();this.paint(true);}});rotate.disabled=!!a||!this.eligible;actions.append(cancel,rotate);this.offers.append(actions);}
+    if(this.garage){this.garage.hidden=this.tab!=='garage';for(const spec of VEHICLES){const b=this.garage.querySelector<HTMLButtonElement>(`button[data-vehicle=${spec.id}]`)!;const owned=p.owned.includes(spec.id);b.textContent=p.selected===spec.id?'使用中':owned?'开这辆车':p.coins<spec.price?`差 ${spec.price-p.coins} ◉`:`购买 ${spec.price} ◉`;b.disabled=!this.eligible||p.selected===spec.id||(!owned&&p.coins<spec.price);b.setAttribute('aria-pressed',String(p.selected===spec.id));}}
+    if(this.description)this.description.textContent=!this.eligible?'90 秒挑战中暂停委托和车库':a?`${p.instruction} · 奖励 ${a.contract.reward} 金币`:this.lastComplete||'随机委托，没有倒计时，完成后结算金币。';
+    if(this.saveNote){this.saveNote.textContent=this.saved?'自动存档 · 金币、车库、委托和位置保存在本浏览器':'存档未成功 · 当前进度仅保留在本次游戏中';this.saveNote.dataset.error=String(!this.saved);}
   }
 }

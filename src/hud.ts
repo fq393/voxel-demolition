@@ -393,10 +393,10 @@ export class Hud {
           ? '开车撞穿护栏，或下车用火箭清场。看台、轮胎、围墙，都能拆。'
           : space
             ? '在零重力里拆空间站。切断支架，看太阳翼飘走；轰开舱体，看碎块散进太空。'
-            : '开车穿过车流，遇到路人慢一点。兜风、送包裹、清理街角，按你的节奏来。'
+            : '开车穿过车流，遇到路人慢一点。接委托赚金币，换辆车再出发。送包裹、清理街角，按你的节奏来。'
       }</p>
-      <div class="buttons"><button class="play">开始拆除</button></div>
-      <div class="grid tap">
+      <div class="buttons"><button class="play">${track ? '开始驾驶' : space ? '开始拆除' : '出发逛城'}</button></div>
+      <details class="control-help"><summary>操作说明</summary><div class="grid tap">
         <b>左手</b><span>摇杆移动 · 推过圆环加速</span>
         <b>右手</b><span>拖动画面转向</span>
         <b>发射</b><span>使用工具 · 按住并拖动可边瞄准边发射</span>
@@ -410,10 +410,10 @@ export class Hud {
         <b>滚轮 / Tab</b><span>切换工具 / 按住打开工具盘</span>
         <b>F / X</b><span>靠近车辆上下车 · 离车切换飞行/步行 / 慢动作</span>
         <b>Esc / R</b><span>暂停 / 重置场景</span>
-        ${!track && !space ? '<b>G</b><span>打开小任务菜单 · 跟着绿色地图标记走</span>' : ''}
+        ${!track && !space ? '<b>G</b><span>打开委托和车库 · 跟着绿色地图标记走</span>' : ''}
         ${track ? '<b>驾车</b><span>W/S 油门与刹车 · A/D 转向 · Space 手刹 · B 加速 · 左键火箭 · 右键机枪 · F 上下车</span>' : ''}
       </div>
-      <p class="reset-help">拆过头了？按 R，把场景重新搭起来。</p>
+      <p class="reset-help">拆过头了？按 R，把场景重新搭起来。</p></details>
       <details>
         <summary>画面与操作设置</summary>
         <div class="row"><span>视角灵敏度</span><input type="range" name="sensitivity" min="0.2" max="3" step="0.05"></div>

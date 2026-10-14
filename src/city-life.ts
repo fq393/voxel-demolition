@@ -123,8 +123,8 @@ export class CityLife {
     return false;
   }
 
-  blocksCar(x: number, y: number, heading: number): boolean {
-    const body = this.collisionBody; body.x = x; body.y = y; body.heading = heading;
+  blocksCar(x: number, y: number, heading: number, size: readonly number[] = [4.6, 2, 1.15]): boolean {
+    const body = this.collisionBody; body.x = x; body.y = y; body.heading = heading; body.halfLength = size[0] / 2; body.halfWidth = size[1] / 2;
     for (const car of this.state.cars) if (vehicleFootprintsOverlap(body, car)) return true;
     for (const p of this.state.pedestrians) if (pointNearVehicle(p.x, p.y, body, 0.32)) return true;
     return false;

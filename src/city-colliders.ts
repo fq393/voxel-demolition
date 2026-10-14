@@ -44,7 +44,7 @@ export function overlapsPlayer(boxes: readonly StaticBox[], x: number, y: number
 }
 
 /** Full four-axis SAT: the car's oriented ground footprint against each AABB. */
-export function overlapsVehicle(boxes: readonly StaticBox[], cx: number, cy: number, heading: number, halfLength = 2.3, halfWidth = 1): boolean {
+export function overlapsVehicle(boxes: readonly StaticBox[], cx: number, cy: number, heading: number, halfLength = 2.3, halfWidth = 1, height = 1.35): boolean {
   if (halfLength <= 0 || halfWidth <= 0) return false;
   const cos = Math.cos(heading);
   const sin = Math.sin(heading);
@@ -54,7 +54,7 @@ export function overlapsVehicle(boxes: readonly StaticBox[], cx: number, cy: num
   const extentY = halfLength * as + halfWidth * ac;
   for (let i = 0; i < boxes.length; i++) {
     const b = boxes[i];
-    if (b.minZ >= 1.35 || b.maxZ <= 0) continue;
+    if (b.minZ >= height || b.maxZ <= 0) continue;
     const hx = (b.maxX - b.minX) / 2;
     const hy = (b.maxY - b.minY) / 2;
     const dx = (b.minX + b.maxX) / 2 - cx;

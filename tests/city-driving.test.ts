@@ -34,3 +34,19 @@ test('fast sideways drift cannot bypass the exit speed gate', () => {
   assert.equal(safeExitSpeed(3, 3), false);
   assert.equal(safeExitSpeed(0, 0), true);
 });
+
+test('all city variants park and leave an exit outside their actual footprint', async () => {
+  const { VEHICLES } = await import('../src/vehicle-spec.ts');
+  const city = buildCity(), player = new Player(city);
+  for (const spec of VEHICLES) for (const [x,y,h] of CITY_CAR_SPAWNS) {
+    assert.equal(sweep(city,x,y,h,spec.size).length,0,`${spec.id} parking blocked`);
+    const exit=findVehicleExit(x,y,h,(px,py,pz)=>player.blocked(px,py,pz,1.8)||playerOverlapsCar(px,py,pz,1.8,x,y,h,spec.size),spec.size);
+    assert.ok(exit,`${spec.id} cannot leave vehicle`);
+    assert.equal(playerOverlapsCar(...exit,1.8,x,y,h,spec.size),false);
+  }
+});
+test('van roof and nose remain solid above the old sports-car collider', () => {
+  const van=[5.125,2.125,2.125];
+  assert.equal(playerOverlapsCar(2.5,0,1.7,1.8,0,0,0,van),true);
+  assert.equal(playerOverlapsCar(0,0,2.3,1.8,0,0,0,van),false);
+});

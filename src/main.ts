@@ -26,7 +26,7 @@ import { Structure } from './structure.ts';
 import { ViewModel } from './viewmodel.ts';
 import { buildCity, type City, emptyCity, isGlass, Mat, raycast, VOXEL, voxelAt } from './world.ts';
 import { buildTrack, gridSlot, KERB, RUNOFF, TRACK_WIDTH, trackField, type TrackLine } from './track.ts';
-import { CAR_MASS, CAR_SIZE, CLEARANCE, Car, type Drive, sweep } from './car.ts';
+import { CLEARANCE, Car, type Drive, sweep } from './car.ts';
 import { CAP_MIN, chooseProfile, type DeviceProfile, deviceKey, forgetProfile, measureFrames, measurePhysics, type Quality, saveProfile, savedProfile } from './calibrate.ts';
 import { Flames } from './flames.ts';
 import { SuitJets } from './jets.ts';
@@ -36,6 +36,7 @@ import { Loader } from './loader.ts';
 import { DemolitionMission } from './mission.ts';
 import { PlayerBoard } from './player-board.ts';
 import { CityJobs } from './city-jobs.ts';
+import { vehicleSpec, type VehicleId } from './vehicle-spec.ts';
 import { CityAmbience } from './city-ambience.ts';
 import { CityLife } from './city-life.ts';
 
@@ -164,6 +165,7 @@ const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
 const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
 let cityJobs: CityJobs | null = null;
+let saveElapsed = 0;
 const mission = SCENE === 'city' ? new DemolitionMission({
   onRetry: async () => { pausePlay(); await rebuild(); },
   onSandbox: () => play(),
@@ -257,6 +259,7 @@ function play(): void {
   });
 }
 function pausePlay(showMenu = true): void {
+  saveCityPose();
   playSequence++;
   if (pendingRankedStart) {
     pendingRankedStart = rankedPrepared = false;
@@ -370,12 +373,12 @@ const GET_IN = SCENE === 'city' ? 5.5 : 8;
 /** Near enough to get in, last frame (the prompt shows as the player comes up to it). */
 let byCar = false;
 /** Into the car (the chase view behind it) or out of it (standing by its door, on foot). */
-function setDriving(on: boolean, forceExit = false): void {
+function setDriving(on: boolean, forceExit = false, preferredExit?: [number,number,number]): void {
   if (!car) return;
   let exit: [number, number, number] | null = null;
   if (!on && SCENE === 'city') {
     if (!forceExit && !safeExitSpeed(car.velocity.x, car.velocity.y)) { hud.toast('先松开油门、按 Space 刹车，再下车'); return; }
-    exit = findVehicleExit(car.position.x, car.position.y, car.heading, (x, y, z) => player.blocked(x, y, z, 1.8));
+    exit = preferredExit ?? findVehicleExit(car.position.x, car.position.y, car.heading, (x, y, z) => player.blocked(x, y, z, 1.8), car.size);
     if (!exit && !forceExit) { hud.toast('车门旁没有空位，挪开一点再下车'); return; }
   }
   held = aiming = wantFire = rocketDue = false;
@@ -602,7 +605,7 @@ let cityLife: CityLife | null = null;
 let streetDetails: StreetDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
-player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading));
+player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
 touch?.setFlying(player.flying);
 if (touch) {
   player.flySpeed = TOUCH_FLY_SPEED;
@@ -704,7 +707,7 @@ async function start(): Promise<void> {
     cityJobs = new CityJobs(city, playerBoard.profile.playerId, () => pausePlay(), (text, complete) => {
       hud.toast(text);
       if (complete) sounds.zap(); else sounds.click();
-    });
+    }, changeCityVehicle);
     cityJobs.mountMenu(hud.menu);
     view.scene.add(cityJobs.object);
   }
@@ -723,12 +726,13 @@ async function start(): Promise<void> {
   }
   spawn();
   if (SCENE === 'city' || (SCENE === 'track' && line)) {
-    car = new Car();
+    car = SCENE === 'city' ? new Car(cityJobs?.progressState.selected ?? 'sedan') : new Car();
     flames = new Flames(car.exhausts().at.length);
     skids = new SkidMarks(2);
     view.scene.add(car.object, car.bits.object, flames.object, skids.object);
     placeCar();
     if (SCENE === 'track') setDriving(true);
+
   }
 
   await loader.stage(3);
@@ -764,6 +768,7 @@ async function start(): Promise<void> {
     saveProfile(profile);
   }
   applyProfile(profile);
+  if (SCENE === 'city') restoreCityPose();
 
   await loader.finish();
   ready = true;
@@ -883,25 +888,75 @@ async function rebuild(): Promise<void> {
   if (mission) playerBoard.updateScore(0, mission.snapshot.mode === 'challenge');
   hud.setLoading(null);
   rebuilding = false;
+  saveCityPose();
 }
 
 /** The car back on the grid, at rest, with its body in the (new) solver. */
 function placeCar(): boolean {
   if (!car) return false;
-  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h).length && !cityLife?.blocksCar(x, y, h) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h)) : null;
+  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h, car!.size).length && !overlapsVehicle(cityStatic, x, y, h, car!.size[0] / 2, car!.size[1] / 2, CLEARANCE+car!.size[2]) && !cityLife?.blocksCar(x, y, h, car!.size) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h, car!.size)) : null;
   if (SCENE === 'city' && !parking) { hud.toast('停车位被堵住了，按 R 重建街区后再试'); return false; }
   if (SCENE !== 'city' && !line) return false;
   const { position, heading } = parking ? { position: [parking[0], parking[1]], heading: parking[2] } : gridSlot(line!);
   car.place(position[0], position[1], heading);
   car.repair();
-  const at = [position[0], position[1], CLEARANCE + CAR_SIZE[2] / 2];
-  if (carSlot < 0) carSlot = physics.vehicle(CAR_SIZE, at);
+  const at = [position[0], position[1], CLEARANCE + car!.size[2] / 2];
+  if (carSlot < 0) carSlot = physics.vehicle([...car.size], at);
   if (carSlot >= 0) physics.drive(carSlot, at, [0, 0, Math.sin(heading / 2), Math.cos(heading / 2)], [0, 0, 0], [0, 0, 0]);
   carTeleported = true;
   boostLeft = 1;
   chase.yaw = heading;
   chase.orbit = chase.lift = chase.idle = 0;
   return true;
+}
+
+/** Persist only the sandbox; ranked sessions must not replace exploration progress. */
+function saveCityPose(): void {
+  if (!ready || rebuilding || !car || !cityJobs || mission?.snapshot.mode !== 'sandbox') return;
+  cityJobs.savePose({player:{x:player.position.x,y:player.position.y,z:player.position.z,yaw:player.yaw,driving},car:{x:car.position.x,y:car.position.y,z:0,yaw:car.heading,health:car.health}});
+}
+
+function restoreCityPose(): void {
+  if (!car || !cityJobs) return;
+  const pose = cityJobs.pose;
+  if (!pose) return;
+  const {car:saved,player:walker} = pose;
+  const validCar = !sweep(city,saved.x,saved.y,saved.yaw,car.size).length
+    && !overlapsVehicle(cityStatic,saved.x,saved.y,saved.yaw,car.size[0]/2,car.size[1]/2,CLEARANCE+car.size[2])
+    && !cityLife?.blocksCar(saved.x,saved.y,saved.yaw,car.size);
+  if (validCar) {
+    car.place(saved.x,saved.y,saved.yaw);car.health=saved.health;car.look.wear.value=1-car.health;
+    const at=[saved.x,saved.y,CLEARANCE+car.size[2]/2];
+    physics.drive(carSlot,at,[0,0,Math.sin(saved.yaw/2),Math.cos(saved.yaw/2)],[0,0,0],[0,0,0]);
+  }
+  if (walker.driving && validCar && car.health>0) setDriving(true);
+  else if (!player.blocked(walker.x,walker.y,walker.z,1.8)) {
+    player.position.set(walker.x,walker.y,walker.z);player.yaw=walker.yaw;
+  }
+  car.draw(1);
+}
+
+/** Switch a garage vehicle at a clear parking spot, preserving the single GPU proxy. */
+function changeCityVehicle(id:VehicleId):boolean {
+  if (!ready || rebuilding || !car || mission?.snapshot.mode !== 'sandbox') return false;
+  const spec=vehicleSpec(id);
+  let garageExit:[number,number,number]|null=null;
+  const parking=CITY_CAR_SPAWNS.find(([x,y,h])=>!sweep(city,x,y,h,spec.size).length
+    && !overlapsVehicle(cityStatic,x,y,h,spec.size[0]/2,spec.size[1]/2,CLEARANCE+spec.size[2])
+    && !cityLife?.blocksCar(x,y,h,spec.size)
+    && (driving ? !!(garageExit=findVehicleExit(x,y,h,(px,py,pz)=>player.blocked(px,py,pz,1.8)
+      || playerOverlapsCar(px,py,pz,1.8,x,y,h,spec.size)
+      || playerOverlapsCar(px,py,pz,1.8,car!.position.x,car!.position.y,car!.heading,car!.size),spec.size))
+      : !playerOverlapsCar(player.position.x,player.position.y,player.position.z,player.height,x,y,h,spec.size)));
+  if (!parking){hud.toast('停车位暂时被占，稍后再试或按 R 重建');return false;}
+  if (driving) setDriving(false,true,garageExit!);
+  const next=new Car(id),old=car;
+  next.place(parking[0],parking[1],parking[2]);car=next;
+  view.scene.remove(old.object,old.bits.object);old.dispose();view.scene.add(next.object,next.bits.object);
+  const at=[parking[0],parking[1],CLEARANCE+next.size[2]/2];
+  physics.resizeVehicle(carSlot,next.size,at);physics.drive(carSlot,at,[0,0,Math.sin(parking[2]/2),Math.cos(parking[2]/2)],[0,0,0],[0,0,0]);
+  carTeleported=true;boostLeft=1;chase.yaw=parking[2];chase.orbit=chase.lift=chase.idle=0;next.draw(1);
+  saveCityPose();return true;
 }
 
 function recallCar(): void {
@@ -948,23 +1003,23 @@ function driveStep(dt: number): void {
   const parts = Math.max(1, Math.ceil((c.velocity.length() * dt) / 0.33));
   // Already into something (wedged, or a wall left standing round it)? A move that goes no further in is free:
   // it can always drive out, or along, never deeper
-  let inside = sweep(city, c.position.x, c.position.y, c.heading).length;
+  let inside = sweep(city, c.position.x, c.position.y, c.heading, c.size).length;
   for (let k = 0; k < parts; k++) {
     c.step(dt / parts, d);
-    if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading)) {
+    if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading, c.size)) {
       const speed = c.velocity.length();
       if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.4, speed / 30)); }
       c.undo(0.12);
       break;
     }
-    if (overlapsVehicle(cityStatic, c.position.x, c.position.y, c.heading)) {
+    if (overlapsVehicle(cityStatic, c.position.x, c.position.y, c.heading, c.size[0]/2, c.size[1]/2, CLEARANCE+c.size[2])) {
       const speed = c.velocity.length();
       if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.6, speed / 25)); }
       hurtCar(Math.max(0, speed - 5) * STOP_DAMAGE, c.position.clone().setZ(0.6));
       if (!carTeleported) c.undo(0.2);
       break;
     }
-    const hits = sweep(city, c.position.x, c.position.y, c.heading);
+    const hits = sweep(city, c.position.x, c.position.y, c.heading, c.size);
     if (hits.length && hits.length <= inside) {
       inside = hits.length;
       continue;
@@ -977,11 +1032,11 @@ function driveStep(dt: number): void {
   }
   if (carSlot >= 0) {
     if (carTeleported) {
-      physics.drive(carSlot, [c.position.x, c.position.y, CLEARANCE + CAR_SIZE[2] / 2], [0, 0, Math.sin(c.heading / 2), Math.cos(c.heading / 2)], [0, 0, 0], [0, 0, 0]);
+      physics.drive(carSlot, [c.position.x, c.position.y, CLEARANCE + car!.size[2] / 2], [0, 0, Math.sin(c.heading / 2), Math.cos(c.heading / 2)], [0, 0, 0], [0, 0, 0]);
       return;
     }
     const turn = Math.atan2(Math.sin(c.heading - h0), Math.cos(c.heading - h0));
-    physics.drive(carSlot, [x0, y0, CLEARANCE + CAR_SIZE[2] / 2], [0, 0, Math.sin(h0 / 2), Math.cos(h0 / 2)], [(c.position.x - x0) / dt, (c.position.y - y0) / dt, 0], [0, 0, turn / dt]);
+    physics.drive(carSlot, [x0, y0, CLEARANCE + car!.size[2] / 2], [0, 0, Math.sin(h0 / 2), Math.cos(h0 / 2)], [(c.position.x - x0) / dt, (c.position.y - y0) / dt, 0], [0, 0, turn / dt]);
   }
 }
 
@@ -995,7 +1050,7 @@ function crash(hits: number[]): boolean {
   const v = c.velocity.length();
   let mass = 0;
   for (const h of hits) mass += isGlass(city.material[h]) ? 6 : city.material[h] === Mat.Leaf ? 2 : 28;
-  const kept = CAR_MASS / (CAR_MASS + 0.7 * mass);
+  const kept = c.mass / (c.mass + 0.7 * mass);
   if (v * kept < 3.5) {
     if (v > 2) {
       sounds.hammer(2);
@@ -2239,7 +2294,7 @@ function tick(now: number): void {
   // Physics at 60 Hz of the world's clock, at most two steps a frame (slowing rather than a spiral)
   const sim = dt * timeScale;
   cityLife?.update(sim, {
-    car: car ? { x: car.position.x, y: car.position.y, heading: car.heading, speed: car.velocity.length() } : null,
+    car: car ? { x: car.position.x, y: car.position.y, heading: car.heading, speed: car.velocity.length(), halfLength: car.size[0]/2, halfWidth: car.size[1]/2 } : null,
     player: { x: player.position.x, y: player.position.y, z: player.position.z, driving },
   });
   simTime += sim;
@@ -2345,6 +2400,8 @@ function tick(now: number): void {
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
   cityJobs?.update(dt, playing && ready && !document.hidden, { x: player.position.x, y: player.position.y, z: player.position.z, driving, flying: player.flying });
+  saveElapsed += dt;
+  if (saveElapsed >= 2) { saveCityPose(); saveElapsed = 0; }
   timeWork((view.renderer.backend as unknown as { device: GPUDevice }).device, began);
   if (frames % 15 === 0 && testing) {
     hud.stats(`${fps.toFixed(0)} fps\n${city.count.toLocaleString()} 体素 · ${physics.loose.toLocaleString()} 活动碎块\n${[player.flying ? '飞行' : '', timeScale < 1 ? '慢动作' : ''].filter(Boolean).join(' · ')}`);
@@ -2453,6 +2510,7 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       ambience: cityAmbience?.diagnostics ?? null,
       cityLife: cityLife?.diagnostics ?? null,
       jobs: cityJobs?.diagnostics ?? null,
+      vehicle: car ? { id: car.vehicleId, health: car.health, size: car.size, mass: car.mass } : null,
       state: mission?.snapshot ?? { mode: 'sandbox' },
     };
   },
@@ -2463,6 +2521,8 @@ addEventListener('resize', () => view.resize(innerWidth, innerHeight));
 // Back, buffers and all, and the next scene, starting alongside it, ran out of memory ("range ... out of bounds").
 // A page it brings back from there has no GPU left, so it loads afresh.
 addEventListener('pagehide', () => {
+  saveCityPose();
+  car?.dispose();
   cityLife?.dispose();
   cityAmbience?.dispose();
   cityJobs?.dispose();

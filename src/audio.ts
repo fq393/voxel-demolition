@@ -181,7 +181,7 @@ export class Sounds {
   /** Noise through a low-pass falling from `from` to `to` Hz over `seconds`, at `gain`. */
   private rumble(gain: number, from: number, to: number, seconds: number, delay = 0): void {
     const { ctx } = this;
-    if (!ctx || !this.master) return;
+    if (!ctx || !this.master || gain <= 0) return;
     const t = ctx.currentTime + delay;
     const src = ctx.createBufferSource();
     src.buffer = this.noise;
@@ -243,7 +243,7 @@ export class Sounds {
   /** Noise through a high-pass (from `cut` Hz), sharp attack, gone over `seconds`. */
   private hiss(gain: number, cut: number, seconds: number, delay = 0): void {
     const { ctx } = this;
-    if (!ctx || !this.master) return;
+    if (!ctx || !this.master || gain <= 0) return;
     const t = ctx.currentTime + delay;
     const src = ctx.createBufferSource();
     src.buffer = this.noise;

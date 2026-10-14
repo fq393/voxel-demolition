@@ -1,6 +1,6 @@
 /** The first city-driving slice shares the existing car and voxel collision solver. */
 export const CITY_CAR_SPAWNS: readonly (readonly [number, number, number])[] = [
-  [-25, -9, Math.PI / 2], [-25, 5, Math.PI / 2], [-25, -23, Math.PI / 2],
+  [-24.5, -9, Math.PI / 2], [-24.5, 5, Math.PI / 2], [-24.5, -23, Math.PI / 2],
   [23, -5, -Math.PI / 2], [2, 23, 0],
 ];
 

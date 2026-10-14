@@ -10,6 +10,9 @@ export interface CityGuideFrame {
   readonly canEnter: boolean;
   /** Vehicle speed in metres per second. */
   readonly speed: number;
+  readonly target?: readonly [number, number] | null;
+  readonly traffic?: readonly { x: number; y: number; heading: number }[];
+  readonly pedestrians?: readonly { x: number; y: number }[];
 }
 export interface CityGuideLandmark {
   readonly minX: number; readonly maxX: number;
@@ -160,7 +163,7 @@ export class CityGuide {
     ctx.clearRect(0, 0, MAP_SIZE, MAP_SIZE);
     ctx.fillStyle = '#10151a'; ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
     // Keep the origin/central demolition site and both actors in view as they roam.
-    this.worldHalf = Math.min(200, Math.max(WORLD_HALF, ...[...frame.player, ...frame.car].map((v) => Math.abs(finite(v)) + 12)));
+    this.worldHalf = Math.min(200, Math.max(WORLD_HALF, ...[...frame.player, ...frame.car, ...(frame.target ?? [])].map((v) => Math.abs(finite(v)) + 12)));
     const mapScale = (MAP_SIZE - EDGE_PADDING * 2) / (this.worldHalf * 2);
     const x = (world: number) => MAP_SIZE / 2 + finite(world) * mapScale;
     const y = (world: number) => MAP_SIZE / 2 - finite(world) * mapScale;
@@ -194,6 +197,19 @@ export class CityGuide {
     ctx.fillStyle = '#b0804a'; ctx.fillRect(x(-6.5), y(5.5), 13 * mapScale, 11 * mapScale);
     ctx.strokeStyle = '#ffba5b'; ctx.lineWidth = 1; ctx.strokeRect(x(-6.5), y(5.5), 13 * mapScale, 11 * mapScale);
     ctx.restore();
+    for (const vehicle of frame.traffic ?? []) {
+      const [tx,ty] = this.point([vehicle.x,vehicle.y]);
+      ctx.save();ctx.translate(tx,ty);ctx.rotate(-vehicle.heading);ctx.fillStyle='#d9bea0';ctx.fillRect(-3,-1.5,6,3);ctx.restore();
+    }
+    for (const pedestrian of frame.pedestrians ?? []) {
+      const [tx,ty] = this.point([pedestrian.x,pedestrian.y]);
+      ctx.fillStyle='#a3c8a8';ctx.beginPath();ctx.arc(tx,ty,1.25,0,Math.PI*2);ctx.fill();
+    }
+    if (frame.target) {
+      const [tx, ty] = this.point(frame.target);
+      ctx.strokeStyle = '#a0efd0'; ctx.fillStyle = '#3e8e72'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(tx,ty-7);ctx.lineTo(tx+7,ty);ctx.lineTo(tx,ty+7);ctx.lineTo(tx-7,ty);ctx.closePath();ctx.fill();ctx.stroke();
+    }
     this.drawCar(ctx, frame.car, frame.carHeading, frame.driving);
     if (!frame.driving) this.drawPlayer(ctx, frame.player, frame.heading);
     ctx.strokeStyle = '#ffffff14'; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, MAP_SIZE - 1, MAP_SIZE - 1);

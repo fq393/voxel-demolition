@@ -35,6 +35,9 @@ import type { Satellites } from './satellites.ts';
 import { Loader } from './loader.ts';
 import { DemolitionMission } from './mission.ts';
 import { PlayerBoard } from './player-board.ts';
+import { CityJobs } from './city-jobs.ts';
+import { CityAmbience } from './city-ambience.ts';
+import { CityLife } from './city-life.ts';
 
 /** What a tool does where it hits: blast radius (m), share of it turned to dust, push (m/s), reach (m), seconds between uses, held fires again. */
 interface ToolSpec extends Tool {
@@ -106,12 +109,17 @@ const canvas = document.querySelector('#view') as HTMLCanvasElement;
 /** Phones and tablets get thumb sticks and buttons (touch.ts) and start a notch lower in quality. */
 const touchDevice = wantsTouch();
 preventZoom();
-const settings: Settings = { sensitivity: 1, fov: 80, invertY: false, quality: touchDevice ? 'medium' : 'high', graphics: 'auto', volume: 0.7, hour: 17, smoothing: false, dof: true, sunRays: true };
+const settings: Settings = { sensitivity: 1, fov: 80, invertY: false, quality: touchDevice ? 'medium' : 'high', graphics: 'auto', volume: 0.7, hour: SCENE === 'city' ? 18.2 : 17, smoothing: false, dof: true, sunRays: true };
 try {
   const saved = JSON.parse(localStorage.getItem('city.settings') ?? '{}') as Partial<Settings>;
   // Settings saved before the device tuning had a fixed quality: they start on Auto
   if (!saved.graphics) delete saved.quality;
   Object.assign(settings, saved);
+  // Move the previous default into the new golden-hour look once; retain other chosen times.
+  if (SCENE === 'city' && !localStorage.getItem('city.warm-look.v1')) {
+    if (settings.hour === 17) settings.hour = 18.2;
+    localStorage.setItem('city.warm-look.v1', '1');
+  }
 } catch {
   // no saved settings
 }
@@ -155,6 +163,7 @@ hud.onReset = () => void rebuild().then(() => hud.toast('已重建'));
 const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
 const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
+let cityJobs: CityJobs | null = null;
 const mission = SCENE === 'city' ? new DemolitionMission({
   onRetry: async () => { pausePlay(); await rebuild(); },
   onSandbox: () => play(),
@@ -163,6 +172,7 @@ const mission = SCENE === 'city' ? new DemolitionMission({
     void playerBoard.finishRun(mission?.snapshot.count ?? 0);
   },
   onModeChange: (mode) => {
+    cityJobs?.setEligible(mode === 'sandbox');
     playSequence++;
     pendingRankedStart = rankedPrepared = false;
     playerBoard.resetRound();
@@ -299,6 +309,7 @@ const GAME_KEYS = new Set(['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 
 addEventListener('keydown', (e) => {
   if (!playing) return;
   if (e.code === 'Escape') { pausePlay(); return; }
+  if (e.code === 'KeyG' && SCENE === 'city') { pausePlay(); return; }
   if (GAME_KEYS.has(e.code)) e.preventDefault();
   if (e.repeat) return;
   keys.add(e.code);
@@ -585,10 +596,13 @@ if (touch) {
 // Built while the page loads (start): empty until then
 let city = emptyCity();
 let cityStatic: StaticBox[] = [];
+let cityBuildings: StaticBox[] = [];
+let cityAmbience: CityAmbience | null = null;
+let cityLife: CityLife | null = null;
 let streetDetails: StreetDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
-player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading));
+player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading));
 touch?.setFlying(player.flying);
 if (touch) {
   player.flySpeed = TOUCH_FLY_SPEED;
@@ -605,7 +619,9 @@ const concreteDust = new THREE.Color(0.62, 0.6, 0.56);
 
 /** Static perimeter buildings stop rays; the centre remains the destructible voxel world. */
 function castWorld(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): ReturnType<typeof raycast> {
-  const staticHit = firstStaticHit(cityStatic, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
+  const sceneryHit = firstStaticHit(cityStatic, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
+  const trafficHit = cityLife?.rayHit(origin, direction, sceneryHit ?? reach) ?? null;
+  const staticHit = trafficHit ?? sceneryHit;
   const hit = raycast(city, origin, direction, staticHit ?? reach);
   if (hit) return hit;
   return staticHit === null ? null : { t: staticHit, voxel: -1, normal: [-direction[0], -direction[1], -direction[2]] };
@@ -676,10 +692,21 @@ async function start(): Promise<void> {
     view.setStreets(city);
     const surrounding = skyline(city) as THREE.InstancedMesh;
     view.scene.add(surrounding);
-    cityStatic = collectSkylineColliders(surrounding);
-    cityGuide?.setLandmarks(cityStatic);
+    cityBuildings = collectSkylineColliders(surrounding);
+    cityAmbience = new CityAmbience(cityBuildings);
+    cityStatic = [...cityBuildings, ...cityAmbience.colliders];
+    view.scene.add(cityAmbience.object);
+    cityLife = new CityLife(city, cityStatic);
+    view.scene.add(cityLife.object);
+    cityGuide?.setLandmarks(cityBuildings);
     streetDetails = new StreetDetails(city);
     view.scene.add(streetDetails.object);
+    cityJobs = new CityJobs(city, playerBoard.profile.playerId, () => pausePlay(), (text, complete) => {
+      hud.toast(text);
+      if (complete) sounds.zap(); else sounds.click();
+    });
+    cityJobs.mountMenu(hud.menu);
+    view.scene.add(cityJobs.object);
   }
   effects = startEffects();
   if (SCENE === 'space') {
@@ -841,6 +868,8 @@ async function rebuild(): Promise<void> {
   view.attachBalls(physics.spares);
   player.debrisCount = 0;
   streetDetails?.reset(city);
+  cityLife?.reset(city, cityStatic);
+  cityJobs?.reset(city);
   spawn();
   if (car) {
     placeCar();
@@ -859,7 +888,7 @@ async function rebuild(): Promise<void> {
 /** The car back on the grid, at rest, with its body in the (new) solver. */
 function placeCar(): boolean {
   if (!car) return false;
-  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h).length && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h)) : null;
+  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h).length && !cityLife?.blocksCar(x, y, h) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h)) : null;
   if (SCENE === 'city' && !parking) { hud.toast('停车位被堵住了，按 R 重建街区后再试'); return false; }
   if (SCENE !== 'city' && !line) return false;
   const { position, heading } = parking ? { position: [parking[0], parking[1]], heading: parking[2] } : gridSlot(line!);
@@ -882,7 +911,7 @@ function recallCar(): void {
 
 function updateCityGuide(): void {
   if (!cityGuide || !car) return;
-  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed });
+  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed, target: cityJobs?.state.target ?? null, traffic: cityLife?.state.cars, pedestrians: cityLife?.state.pedestrians });
 }
 
 /** The car's controls: keys and the thumb stick (throttle up, steer across), or coasting to a stop with no one in it. */
@@ -922,6 +951,12 @@ function driveStep(dt: number): void {
   let inside = sweep(city, c.position.x, c.position.y, c.heading).length;
   for (let k = 0; k < parts; k++) {
     c.step(dt / parts, d);
+    if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading)) {
+      const speed = c.velocity.length();
+      if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.4, speed / 30)); }
+      c.undo(0.12);
+      break;
+    }
     if (overlapsVehicle(cityStatic, c.position.x, c.position.y, c.heading)) {
       const speed = c.velocity.length();
       if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.6, speed / 25)); }
@@ -1845,6 +1880,7 @@ const smokeTint = new THREE.Color(0.5, 0.5, 0.5);
 
 /** Tool `t`'s blast at `at`, `distance` m from the player: the damage, and its sound, flash, dust. */
 function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: ArrayLike<number>): void {
+  cityLife?.scare(at.x, at.y, t.radius + 8);
   satellites?.blast(at, t.radius);
   // The car caught in it (its own rockets too, fired too close)
   if (car) {
@@ -2136,6 +2172,7 @@ function tick(now: number): void {
   updateCityGuide();
   const began = performance.now();
   if (screenshotPaused || rebuilding || (ready && (!playing || document.hidden))) {
+    if (!screenshotPaused) cityJobs?.update(0, false, { x: player.position.x, y: player.position.y, z: player.position.z, driving });
     last = now;
     view.render();
     return;
@@ -2201,6 +2238,10 @@ function tick(now: number): void {
   }
   // Physics at 60 Hz of the world's clock, at most two steps a frame (slowing rather than a spiral)
   const sim = dt * timeScale;
+  cityLife?.update(sim, {
+    car: car ? { x: car.position.x, y: car.position.y, heading: car.heading, speed: car.velocity.length() } : null,
+    player: { x: player.position.x, y: player.position.y, z: player.position.z, driving },
+  });
   simTime += sim;
   accumulator += sim;
   let steps = 0;
@@ -2303,6 +2344,7 @@ function tick(now: number): void {
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
+  cityJobs?.update(dt, playing && ready && !document.hidden, { x: player.position.x, y: player.position.y, z: player.position.z, driving, flying: player.flying });
   timeWork((view.renderer.backend as unknown as { device: GPUDevice }).device, began);
   if (frames % 15 === 0 && testing) {
     hud.stats(`${fps.toFixed(0)} fps\n${city.count.toLocaleString()} 体素 · ${physics.loose.toLocaleString()} 活动碎块\n${[player.flying ? '飞行' : '', timeScale < 1 ? '慢动作' : ''].filter(Boolean).join(' · ')}`);
@@ -2375,6 +2417,9 @@ if (testing) Object.assign(window, {
     get ready() { return ready; },
     get driving() { return driving; },
     get streetDetails() { return streetDetails; },
+    get jobs() { return cityJobs; },
+    get life() { return cityLife; },
+    get ambience() { return cityAmbience; },
     get staticColliders() { return cityStatic; },
     get freeLook() { return freeLook; },
     playerBoard,
@@ -2388,6 +2433,8 @@ if (testing) Object.assign(window, {
       touchPlaying = !!touch;
       if (touch) touch.visible = true;
       mission?.start();
+      cityJobs?.update(0, true, { x: player.position.x, y: player.position.y, z: player.position.z, driving, flying: player.flying });
+      updateCityGuide();
       return { state };
     },
     setPausedForScreenshot(paused: boolean) { screenshotPaused = paused; },
@@ -2402,7 +2449,10 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       renderer: { calls: info.render.drawCalls, triangles: info.render.triangles, geometries: info.memory.geometries, textures: info.memory.textures, memoryBytes: info.memory.total },
       physics: { engine: 'three-avbd WebGPU', timestep: 1 / 60, voxels: city.count, loose: physics?.loose ?? 0 },
       streetDetails: streetDetails?.diagnostics ?? null,
-      staticBuildings: cityStatic.length,
+      staticBuildings: cityBuildings.length,
+      ambience: cityAmbience?.diagnostics ?? null,
+      cityLife: cityLife?.diagnostics ?? null,
+      jobs: cityJobs?.diagnostics ?? null,
       state: mission?.snapshot ?? { mode: 'sandbox' },
     };
   },
@@ -2413,6 +2463,9 @@ addEventListener('resize', () => view.resize(innerWidth, innerHeight));
 // Back, buffers and all, and the next scene, starting alongside it, ran out of memory ("range ... out of bounds").
 // A page it brings back from there has no GPU left, so it loads afresh.
 addEventListener('pagehide', () => {
+  cityLife?.dispose();
+  cityAmbience?.dispose();
+  cityJobs?.dispose();
   streetDetails?.dispose();
   (view.renderer.backend as unknown as { device?: GPUDevice }).device?.destroy();
 });

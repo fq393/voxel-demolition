@@ -7,6 +7,7 @@ import { buildCity } from '../src/world.ts';
 import { Player } from '../src/player.ts';
 import { skyline } from '../src/skyline.ts';
 import { collectSkylineColliders, overlapsPlayer, overlapsVehicle } from '../src/city-colliders.ts';
+import { CITY_CAR_SPAWNS } from '../src/city-driving.ts';
 
 const EMPTY_FRAME: LifeFrame = { car: null, player: { x: -120, y: -120, z: 0, driving: false } };
 const CLEAR = { carBlocked: () => false, pedestrianBlocked: () => false };
@@ -45,6 +46,17 @@ test('same seed and elapsed time produce the same street life at different frame
   const a = new StreetSimulation(CLEAR), b = new StreetSimulation(CLEAR);
   advance(a, 30, EMPTY_FRAME, 1 / 60); advance(b, 30, EMPTY_FRAME, 1 / 30);
   assert.deepEqual(a.state, b.state);
+});
+
+test('the default parked car leaves both traffic lanes circulating when the player gets in', () => {
+  const sim = new StreetSimulation(CLEAR), [x,y,heading] = CITY_CAR_SPAWNS[0];
+  const frame:LifeFrame = {car:{x,y,heading,speed:0},player:{x,y,z:0,driving:true}};
+  const travel = sim.state.cars.map(()=>0);
+  for(let step=0;step<120*60;step++){
+    const before=sim.state.cars.map(c=>({x:c.x,y:c.y}));sim.update(1/60,frame);
+    sim.state.cars.forEach((car,i)=>travel[i]+=Math.hypot(car.x-before[i].x,car.y-before[i].y));
+  }
+  sim.state.cars.forEach((car,i)=>assert.ok(travel[i]>sim.state.routes[car.route].length,`car ${car.id} stayed queued behind the parking slot`));
 });
 
 test('road phases include clearance time and stopped traffic resumes over repeated cycles', () => {

@@ -137,7 +137,7 @@ test('bad/unknown save versions, cars, balance math, offers and completed active
 test('poses retain health and heading, clamp altitude, and discard nonfinite/out-of-world coordinates', () => {
   const pose: CityProgressPose = { player: { x: -24, y: -10, z: 80, yaw: 20, driving: false }, car: { x: -24.5, y: -12, z: 50, yaw: -10, health: 0.4 } };
   const valid = validateCityPose(pose)!;
-  assert.equal(valid.player.z, 2); assert.equal(valid.car.z, 1); assert.equal(valid.car.health, 0.4);
+  assert.equal(valid.player.z, 60); assert.equal(valid.car.z, 1); assert.equal(valid.car.health, 0.4);
   assert.ok(Math.abs(valid.player.yaw) <= Math.PI); assert.ok(Math.abs(valid.car.yaw) <= Math.PI);
   const progress = make(); assert.equal(progress.capturePose(pose), true);
   const restore = new CityProgress({ cleanupZones: zones, snapshot: progress.snapshot() }); assert.deepEqual(restore.pose, valid);
@@ -147,6 +147,20 @@ test('poses retain health and heading, clamp altitude, and discard nonfinite/out
   assert.equal(progress.capturePose({ ...pose, player: { ...pose.player, x: Infinity } }), false); assert.deepEqual(progress.pose, valid);
   const invalidPoseSave = progress.snapshot(); invalidPoseSave.pose!.car.x = 1000;
   assert.equal(validateCityProgress(invalidPoseSave, zones)?.pose, null);
+  assert.equal(validateCityPose({ ...pose, player: { ...pose.player, z: 3.25 } })?.player.z, 3.25);
+});
+
+test('old v0.4 wallets gain empty indoor state without changing the version or key', () => {
+  const progress = make(); finishTour(progress);
+  const legacy: Record<string, unknown> = { ...progress.snapshot() }; delete legacy.indoor; delete legacy.contractEarned;
+  const migrated = validateCityProgress(legacy, zones)!;
+  assert.deepEqual(migrated.indoor, { active: null, completed: [] });
+  assert.equal(migrated.coins, progress.coins); assert.equal(migrated.completed, 1);
+  assert.equal(migrated.contractEarned, progress.earned);
+  const db = storage(); db.values.set(cityProgressKey('legacy-player'), JSON.stringify(legacy));
+  const loaded = loadCityProgress(db, 'legacy-player', zones);
+  assert.equal(loaded.status, 'loaded'); assert.equal(loaded.progress.coins, progress.coins);
+  assert.equal(cityProgressKey('legacy-player'), 'city.progress.v1.legacy-player');
 });
 
 test('storage failures are explicit, nickname identities stay separate, and legacy badges grant no money', () => {

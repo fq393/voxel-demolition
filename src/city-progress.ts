@@ -3,6 +3,7 @@ import { advanceActiveContract, contractGoal, contractInstruction, contractTarge
   type ActiveContract, type CityContract, type CleanupZone, type ContractFrame, type ContractPoint, type ContractType } from './city-contracts.ts';
 import { advanceIndoorMission, emptyIndoorState, indoorEarned, indoorMission, isDistrictId, validateIndoorState,
   type ActiveIndoorMission, type IndoorCompletion, type IndoorMissionFrame, type IndoorMissionState } from './indoor-mission-state.ts';
+import { EscapeAttempt, emptyEscapeState, validateEscapeState, escapeEarned, ESCAPE_REWARD, type EscapeMissionState, type EscapeFrame, type EscapeCompletion } from './escape-state.ts';
 import type { DistrictBuilding, DistrictId } from './district-layout.ts';
 
 export const CITY_PROGRESS_VERSION = 1;
@@ -28,6 +29,7 @@ export interface CityProgressSnapshot {
   pose: CityProgressPose | null;
   badges: ContractType[];
   indoor: IndoorMissionState;
+  escape: EscapeMissionState;
 }
 export interface ContractCompletion { contract: CityContract; coins: number; reward: number }
 export interface ProgressStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -76,10 +78,11 @@ export function validateCityProgress(value: unknown, zones?: readonly CleanupZon
     || !Array.isArray(value.badges) || value.badges.length > 3 || !value.badges.every(v => TYPES.includes(v as ContractType))
     || new Set(value.badges).size !== value.badges.length) return null;
   const indoor = validateIndoorState(value.indoor);
-  if (!indoor) return null;
+  const escape = validateEscapeState(value.escape);
+  if (!indoor || !escape || (escape.active && (indoor.active || value.active !== null))) return null;
   const vehicleCost = value.owned.reduce((sum, id) => sum + vehicleSpec(id).price, 0);
   const contractEarned = value.contractEarned === undefined && value.indoor === undefined ? value.earned : value.contractEarned;
-  if (!integer(contractEarned) || value.earned !== contractEarned + indoorEarned(indoor)
+  if (!integer(contractEarned) || value.earned !== contractEarned + indoorEarned(indoor) + escapeEarned(escape)
     || value.earned - vehicleCost !== value.coins || value.completed > value.serial - 1
     || contractEarned > value.completed * 180 || contractEarned < value.completed * 90) return null;
   const offers = value.offers.map(offer => validateContract(offer, value.seed as number, value.serial as number, zones));
@@ -97,7 +100,7 @@ export function validateCityProgress(value: unknown, zones?: readonly CleanupZon
   }
   return { version: CITY_PROGRESS_VERSION, coins: value.coins, owned: [...value.owned], selected: value.selected,
     completed: value.completed, earned: value.earned, contractEarned, seed: value.seed, serial: value.serial,
-    offers: offers as CityContract[], active, pose: value.pose === null ? null : validateCityPose(value.pose), badges: [...value.badges] as ContractType[], indoor };
+    offers: offers as CityContract[], active, pose: value.pose === null ? null : validateCityPose(value.pose), badges: [...value.badges] as ContractType[], indoor, escape };
 }
 
 export function deserializeCityProgress(serialized: string, zones?: readonly CleanupZone[]): CityProgressSnapshot | null {
@@ -108,13 +111,15 @@ export function deserializeCityProgress(serialized: string, zones?: readonly Cle
 export class CityProgress {
   private data: CityProgressSnapshot;
   private zones: CleanupZone[];
+  private escapeAttempt: EscapeAttempt | null = null;
   constructor(options: ProgressOptions = {}) {
     this.zones = sanitizeCleanupZones(options.cleanupZones ?? []);
     const restored = options.snapshot ? validateCityProgress(options.snapshot, this.zones) : null;
     const seed = integer(options.seed, 0, 0xffffffff) ? options.seed : 1;
     this.data = restored ?? { version: CITY_PROGRESS_VERSION, coins: 0, owned: ['sedan'], selected: 'sedan', completed: 0, earned: 0, contractEarned: 0,
       seed, serial: 1, offers: generateContracts(seed, 1, this.zones), active: null, pose: null,
-      badges: [...new Set((options.legacyBadges ?? []).filter((id): id is ContractType => TYPES.includes(id as ContractType)))], indoor: emptyIndoorState() };
+      badges: [...new Set((options.legacyBadges ?? []).filter((id): id is ContractType => TYPES.includes(id as ContractType)))], indoor: emptyIndoorState(), escape: emptyEscapeState() };
+    this.restartEscape();
   }
   get coins(): number { return this.data.coins; }
   get owned(): readonly VehicleId[] { return this.data.owned; }
@@ -128,6 +133,7 @@ export class CityProgress {
   get pose(): CityProgressPose | null { return this.data.pose; }
   get badges(): readonly ContractType[] { return this.data.badges; }
   get indoor(): Readonly<IndoorMissionState> { return this.data.indoor; }
+  get escape(): Readonly<EscapeMissionState> { return this.data.escape; }
   get activeIndoor(): Readonly<ActiveIndoorMission> | null { return this.data.indoor.active; }
   get completedIndoor(): readonly DistrictId[] { return this.data.indoor.completed; }
   get target(): ContractPoint | null { return contractTarget(this.data.active); }
@@ -136,7 +142,7 @@ export class CityProgress {
   setCleanupZones(zones: readonly CleanupZone[]): void { this.zones = sanitizeCleanupZones(zones); }
 
   acceptContract(id: string, demolished = 0): boolean {
-    if (this.data.active || this.data.indoor.active || this.data.serial >= MAX_VALUE || !integer(demolished, 0, 1_000_000)) return false;
+    if (this.data.active || this.data.indoor.active || this.data.escape.active || this.data.serial >= MAX_VALUE || !integer(demolished, 0, 1_000_000)) return false;
     const contract = this.data.offers.find(offer => offer.id === id);
     if (!contract) return false;
     if (contract.type === 'cleanup' && !this.zones.some(zone => zone.id === contract.cleanupZoneId && zone.remaining >= contract.cleanupTarget)) return false;
@@ -145,7 +151,7 @@ export class CityProgress {
   }
   cancelContract(): void { this.data.active = null; }
   acceptIndoor(id: unknown): boolean {
-    if (!isDistrictId(id) || this.data.active || this.data.indoor.active || this.data.indoor.completed.includes(id)) return false;
+    if (!isDistrictId(id) || this.data.active || this.data.indoor.active || this.data.escape.active || this.data.indoor.completed.includes(id)) return false;
     this.data.indoor.active = { id, stage: 0 };
     return true;
   }
@@ -160,6 +166,25 @@ export class CityProgress {
     this.data.earned += reward;
     this.data.coins += reward;
     return { id, reward, coins: this.data.coins };
+  }
+  acceptEscape(): boolean {
+    if (this.data.active || this.data.indoor.active || this.data.escape.active || this.data.escape.completed) return false;
+    this.data.escape.active = { stage: 0 };
+    this.escapeAttempt = new EscapeAttempt(this.data.escape.active);
+    return true;
+  }
+  cancelEscape(): void { this.data.escape.active = null; this.escapeAttempt = null; }
+  restartEscape(): void {
+    if (this.data.escape.active) {
+      this.data.escape.active.stage = 0;
+      this.escapeAttempt = new EscapeAttempt(this.data.escape.active);
+    } else this.escapeAttempt = null;
+  }
+  advanceEscape(frame: EscapeFrame): EscapeCompletion | null {
+    if (!this.data.escape.active || !this.escapeAttempt?.advance(frame)) return null;
+    this.data.escape.active = null; this.data.escape.completed = true; this.escapeAttempt = null;
+    this.data.earned += ESCAPE_REWARD; this.data.coins += ESCAPE_REWARD;
+    return { reward: ESCAPE_REWARD, coins: this.data.coins };
   }
   /** Rebuilding/restoring the world changes the region's counter, not work already completed. */
   rebaseCleanup(demolished: number): void {
@@ -180,7 +205,7 @@ export class CityProgress {
     return { contract, reward: contract.reward, coins: this.data.coins };
   }
   rotateOffers(): boolean {
-    if (this.data.active || this.data.indoor.active || this.data.serial >= MAX_VALUE) return false;
+    if (this.data.active || this.data.indoor.active || this.data.escape.active || this.data.serial >= MAX_VALUE) return false;
     this.data.serial++;
     this.data.offers = generateContracts(this.data.seed, this.data.serial, this.zones);
     return true;

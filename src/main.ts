@@ -15,6 +15,11 @@ import { Impacts } from './impacts.ts';
 import { skyline } from './skyline.ts';
 import { StreetDetails } from './street-details.ts';
 import { CityGuide } from './city-guide.ts';
+import { CityPolice } from './police.ts';
+import { GARAGE, inGarage } from './police-types.ts';
+import { WantedState, type Crime } from './wanted-state.ts';
+import { WantedUI } from './wanted-ui.ts';
+import { warehouseBreachOpen } from './escape-world.ts';
 import { CITY_CAR_SPAWNS, findVehicleExit, playerOverlapsCar, safeExitSpeed } from './city-driving.ts';
 import { collectSkylineColliders, firstStaticHit, overlapsPlayer, overlapsVehicle, type StaticBox } from './city-colliders.ts';
 import { Particles } from './particles.ts';
@@ -183,6 +188,14 @@ const playerBoard = new PlayerBoard({ onPause: () => pausePlay() });
 playerBoard.mountMenu(hud.menu);
 const cityGuide = SCENE === 'city' ? new CityGuide({ onToggleVehicle: () => { if (playing) pressF(); }, onRecallVehicle: () => recallCar() }) : null;
 let cityJobs: CityJobs | null = null;
+const wanted = new WantedState();
+if (SCENE === 'city') { try { wanted.setEnabled(localStorage.getItem(`city.police.v1.${playerBoard.profile.playerId}`) !== 'off'); } catch { /* Session preference still works. */ } }
+const wantedUI = SCENE === 'city' ? new WantedUI(hud.menu, wanted, () => {
+  wanted.setEnabled(!wanted.enabled);
+  if (!wanted.enabled) cityJobs?.cancelEscape();
+  try { localStorage.setItem(`city.police.v1.${playerBoard.profile.playerId}`, wanted.enabled ? 'on' : 'off'); } catch { hud.toast('警察设置本次生效，浏览器未能保存'); }
+  cityJobs?.setPoliceLock(false);
+}) : null;
 let districtSigns: DistrictSigns | null = null;
 let damageSerialized = '';
 const damageStorage = {getItem:(key:string)=>localStorage.getItem(key),setItem:(key:string,value:string)=>localStorage.setItem(key,value)};
@@ -198,6 +211,9 @@ const mission = SCENE === 'city' ? new DemolitionMission({
     if (ready && worldMode === 'sandbox') saveWorldDamage();
     worldMode = mode;
     cityJobs?.setEligible(mode === 'sandbox');
+    wanted.setEligible(mode === 'sandbox');
+    if (cityPolice) cityPolice.object.visible = mode === 'sandbox';
+    wantedUI?.update(false);
     playSequence++;
     pendingRankedStart = rankedPrepared = false;
     playerBoard.resetRound();
@@ -286,6 +302,7 @@ function play(): void {
 }
 function pausePlay(showMenu = true): void {
   saveCityPose();
+  sounds.policeSiren(false);
   playSequence++;
   if (pendingRankedStart) {
     pendingRankedStart = rankedPrepared = false;
@@ -630,13 +647,14 @@ let cityStatic: StaticBox[] = [];
 let cityBuildings: StaticBox[] = [];
 let cityAmbience: CityAmbience | null = null;
 let cityLife: CityLife | null = null;
+let cityPolice: CityPolice | null = null;
 let streetDetails: StreetDetails | null = null;
 let urbanProps: UrbanPropRenderer | null = null;
 let urbanChain: UrbanChain | null = null;
 let blastDetails: BlastDetails | null = null;
 let structure = new Structure(city);
 const player = new Player(city);
-player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
+player.extraBlocked = (x, y, z, height) => overlapsPlayer(cityStatic, x, y, z, height) || !!cityLife?.blocksPlayer(x, y, z, height) || (worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x, y, z, height)) || (!!car && !driving && playerOverlapsCar(x, y, z, height, car.position.x, car.position.y, car.heading, car.size));
 touch?.setFlying(player.flying);
 if (touch) {
   player.flySpeed = TOUCH_FLY_SPEED;
@@ -655,7 +673,8 @@ const concreteDust = new THREE.Color(0.62, 0.6, 0.56);
 function castWorld(origin: ArrayLike<number>, direction: ArrayLike<number>, reach: number): ReturnType<typeof raycast> {
   const sceneryHit = firstStaticHit(cityStatic, [origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], reach);
   const trafficHit = cityLife?.rayHit(origin, direction, sceneryHit ?? reach) ?? null;
-  const staticHit = trafficHit ?? sceneryHit;
+  const policeHit = worldMode === 'sandbox' ? cityPolice?.rayHit(origin, direction, trafficHit ?? sceneryHit ?? reach) ?? null : null;
+  const staticHit = policeHit ?? trafficHit ?? sceneryHit;
   const hit = raycast(city, origin, direction, staticHit ?? reach);
   if (hit) return hit;
   return staticHit === null ? null : { t: staticHit, voxel: -1, normal: [-direction[0], -direction[1], -direction[2]] };
@@ -730,7 +749,12 @@ async function start(): Promise<void> {
     cityAmbience = new CityAmbience(cityBuildings);
     cityStatic = [...cityBuildings, ...cityAmbience.colliders];
     view.scene.add(cityAmbience.object);
+    cityPolice = new CityPolice(city, cityStatic);
+    cityStatic = [...cityStatic, ...cityPolice.colliders];
+    view.scene.add(cityPolice.object);
     cityLife = new CityLife(city, cityStatic);
+    cityLife.extraCarBlocked = (x,y,h) => worldMode === 'sandbox' && !!cityPolice?.blocksCar(x,y,h,[4.3,1.84,1.36]);
+    cityLife.extraPedestrianBlocked = (x,y) => worldMode === 'sandbox' && !!cityPolice?.blocksPlayer(x,y,0,1.8);
     view.scene.add(cityLife.object);
     cityGuide?.setLandmarks([...cityBuildings,...(city.district??[]).map(b=>b.bounds)]);
     districtSigns = new DistrictSigns(city);
@@ -745,6 +769,10 @@ async function start(): Promise<void> {
       hud.toast(text);
       if (complete) sounds.zap(); else sounds.click();
     }, changeCityVehicle);
+    cityJobs.onEscapeStart = () => {
+      wanted.setEnabled(true); wantedUI?.update(false);
+      try { localStorage.setItem(`city.police.v1.${playerBoard.profile.playerId}`, 'on'); } catch { /* Session still works. */ }
+    };
     cityJobs.mountMenu(hud.menu);
     view.scene.add(cityJobs.object);
   }
@@ -931,6 +959,11 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
   streetDetails?.reset(city);
   urbanProps?.reset(city);
   urbanChain?.reset(city);
+  wanted.reset();
+  cityPolice?.reset(city, [...cityBuildings, ...(cityAmbience?.colliders ?? [])]);
+  cityStatic = [...cityBuildings, ...(cityAmbience?.colliders ?? []), ...(worldMode === 'sandbox' ? cityPolice?.colliders ?? [] : [])];
+  if (cityPolice) cityPolice.object.visible = worldMode === 'sandbox';
+  cityJobs?.setPoliceLock(false);
   cityLife?.reset(city, cityStatic);
   cityJobs?.reset(city);
   spawn();
@@ -959,7 +992,7 @@ async function rebuild(options: {repair?:boolean;restore?:boolean} = {repair:tru
 /** The car back on the grid, at rest, with its body in the (new) solver. */
 function placeCar(): boolean {
   if (!car) return false;
-  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h, car!.size).length && !overlapsVehicle(cityStatic, x, y, h, car!.size[0] / 2, car!.size[1] / 2, CLEARANCE+car!.size[2]) && !cityLife?.blocksCar(x, y, h, car!.size) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h, car!.size)) : null;
+  const parking = SCENE === 'city' ? CITY_CAR_SPAWNS.find(([x, y, h]) => !sweep(city, x, y, h, car!.size).length && !overlapsVehicle(cityStatic, x, y, h, car!.size[0] / 2, car!.size[1] / 2, CLEARANCE+car!.size[2]) && !cityLife?.blocksCar(x, y, h, car!.size) && !(worldMode === 'sandbox' && cityPolice?.blocksCar(x,y,h,car!.size)) && !playerOverlapsCar(player.position.x, player.position.y, player.position.z, player.height, x, y, h, car!.size)) : null;
   if (SCENE === 'city' && !parking) { hud.toast('停车位被堵住了，按 R 重建街区后再试'); return false; }
   if (SCENE !== 'city' && !line) return false;
   const { position, heading } = parking ? { position: [parking[0], parking[1]], heading: parking[2] } : gridSlot(line!);
@@ -1009,7 +1042,7 @@ function restoreCityPose(): void {
   const {car:saved,player:walker} = pose;
   const validCar = !sweep(city,saved.x,saved.y,saved.yaw,car.size).length
     && !overlapsVehicle(cityStatic,saved.x,saved.y,saved.yaw,car.size[0]/2,car.size[1]/2,CLEARANCE+car.size[2])
-    && !cityLife?.blocksCar(saved.x,saved.y,saved.yaw,car.size);
+    && !cityLife?.blocksCar(saved.x,saved.y,saved.yaw,car.size) && !(worldMode === 'sandbox' && cityPolice?.blocksCar(saved.x,saved.y,saved.yaw,car.size));
   if (validCar) {
     car.place(saved.x,saved.y,saved.yaw);car.health=saved.health;car.look.wear.value=1-car.health;
     const at=[saved.x,saved.y,CLEARANCE+car.size[2]/2];
@@ -1024,12 +1057,12 @@ function restoreCityPose(): void {
 
 /** Switch a garage vehicle at a clear parking spot, preserving the single GPU proxy. */
 function changeCityVehicle(id:VehicleId):boolean {
-  if (!ready || rebuilding || !car || mission?.snapshot.mode !== 'sandbox') return false;
+  if (!ready || rebuilding || !car || mission?.snapshot.mode !== 'sandbox' || wanted.stars > 0) return false;
   const spec=vehicleSpec(id);
   let garageExit:[number,number,number]|null=null;
   const parking=CITY_CAR_SPAWNS.find(([x,y,h])=>!sweep(city,x,y,h,spec.size).length
     && !overlapsVehicle(cityStatic,x,y,h,spec.size[0]/2,spec.size[1]/2,CLEARANCE+spec.size[2])
-    && !cityLife?.blocksCar(x,y,h,spec.size)
+    && !cityLife?.blocksCar(x,y,h,spec.size) && !cityPolice?.blocksCar(x,y,h,spec.size)
     && (driving ? !!(garageExit=findVehicleExit(x,y,h,(px,py,pz)=>player.blocked(px,py,pz,1.8)
       || playerOverlapsCar(px,py,pz,1.8,x,y,h,spec.size)
       || playerOverlapsCar(px,py,pz,1.8,car!.position.x,car!.position.y,car!.heading,car!.size),spec.size))
@@ -1047,12 +1080,41 @@ function changeCityVehicle(id:VehicleId):boolean {
 
 function recallCar(): void {
   if (!ready || rebuilding || !playing || driving || !car) return;
+  if (wanted.stars > 0) { hud.toast('先摆脱警察，再呼叫车辆'); return; }
   if (placeCar()) hud.toast('车已回到街边停车位 · 跟着小地图找它');
+}
+
+function reportCrime(kind: Crime): void {
+  if (SCENE !== 'city' || !ready || rebuilding || !playing || document.hidden || worldMode !== 'sandbox') return;
+  wanted.report(kind, [player.position.x,player.position.y,player.position.z]);
+}
+function updatePolice(dt: number): void {
+  if (!cityPolice || !cityJobs || worldMode !== 'sandbox') { sounds.policeSiren(false); return; }
+  const position = [player.position.x,player.position.y,player.position.z] as const;
+  const safe = inGarage(...position);
+  const response = cityPolice.update(dt, {
+    player: { x: position[0],y:position[1],z:position[2],driving,flying:player.flying },
+    car: car ? { x:car.position.x,y:car.position.y,heading:car.heading,speed:car.velocity.length(),halfLength:car.size[0]/2,halfWidth:car.size[1]/2 } : null,
+    traffic:cityLife?.state.cars ?? [], pedestrians:cityLife?.state.pedestrians ?? [], wanted:wanted.command,safe,
+  });
+  wanted.update(dt,{seen:response.seen,safe,position});
+  cityJobs.setPoliceLock(wanted.stars > 0);
+  const previous = cityJobs.progressState.escape.active?.stage;
+  cityJobs.updateEscape({dt,player:{x:position[0],y:position[1],z:position[2],driving,flying:player.flying,grounded:driving || player.onGround},wantedStars:wanted.stars,breachOpen:previous===1 && warehouseBreachOpen(city),safe});
+  if (previous === 0 && cityJobs.progressState.escape.active?.stage === 1) { reportCrime('mission'); cityJobs.setPoliceLock(true); }
+  sounds.policeSiren(wanted.stars > 0 && !safe, Math.min(...cityPolice.units.map(u=>Math.hypot(u.x-position[0],u.y-position[1]))));
+  if (response.caught) {
+    if (driving) setDriving(false,true);
+    wanted.reset(); cityJobs.cancelEscape(); cityJobs.setPoliceLock(false);
+    player.flying=false; touch?.setFlying(false); player.position.set(...GARAGE.center); player.velocity.set(0,0,0); player.yaw=0; player.pitch=.05;
+    if (car) { car.health=1; placeCar(); }
+    pausePlay(); hud.toast('被截停，回车库了 · 金币和建筑损坏保留');
+  }
 }
 
 function updateCityGuide(): void {
   if (!cityGuide || !car) return;
-  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed, target: cityJobs?.state.target ?? null, traffic: cityLife?.state.cars, pedestrians: cityLife?.state.pedestrians });
+  cityGuide.update({ active: playing && ready && !rebuilding && !document.hidden, driving, player: [player.position.x, player.position.y], heading: player.yaw, car: [car.position.x, car.position.y], carHeading: car.heading, canEnter: player.position.distanceTo(car.position) < GET_IN, speed: car.speed, target: cityJobs?.state.target ?? null, traffic: cityLife?.state.cars, pedestrians: cityLife?.state.pedestrians, police: worldMode === 'sandbox' ? cityPolice?.units : [], garage: worldMode === 'sandbox' ? [GARAGE.center[0],GARAGE.center[1]] : undefined });
 }
 
 /** The car's controls: keys and the thumb stick (throttle up, steer across), or coasting to a stop with no one in it. */
@@ -1092,9 +1154,9 @@ function driveStep(dt: number): void {
   let inside = sweep(city, c.position.x, c.position.y, c.heading, c.size).length;
   for (let k = 0; k < parts; k++) {
     c.step(dt / parts, d);
-    if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading, c.size)) {
+    if (cityLife?.blocksCar(c.position.x, c.position.y, c.heading, c.size) || (worldMode === 'sandbox' && cityPolice?.blocksCar(c.position.x,c.position.y,c.heading,c.size))) {
       const speed = c.velocity.length();
-      if (speed > 2) { sounds.hammer(2); shake = Math.max(shake, Math.min(0.4, speed / 30)); }
+      if (speed > 2) { reportCrime('crash'); sounds.hammer(2); shake = Math.max(shake, Math.min(0.4, speed / 30)); }
       c.undo(0.12);
       break;
     }
@@ -1158,6 +1220,7 @@ function crash(hits: number[]): boolean {
   }
   // What it touched beyond those (a corner clipping a post) goes too
   for (const h of hits.slice(0, 40)) if (!hitsAt.some((b) => near(at(h), b.at, 0.95))) hitsAt.push({ at: at(h), radius: 0.3, push: v * 0.4, core: 0 });
+  reportCrime('crash');
   const result = blasts(city, structure, physics, hitsAt);
   unsettled = true;
   afterBlast(result, hitsAt);
@@ -1268,6 +1331,7 @@ function aimed(spec: ToolSpec): { to: THREE.Vector3; hit: boolean } {
   return { to, hit: !!hit };
 }
 function fireGun(): void {
+  reportCrime('shot');
   const muzzle = car!.muzzles().guns[barrel];
   barrel = 1 - barrel;
   const { to, hit } = aimed(BULLET);
@@ -1278,6 +1342,7 @@ function fireGun(): void {
   impacts.hit(muzzle.toArray(), aimDir.toArray(), 0.22, 0.05, hotRing, 0.12);
 }
 function fireRocket(): void {
+  reportCrime('shot');
   const muzzle = car!.muzzles().rockets[launcher];
   loaded[launcher] = simTime + RELOAD;
   launcher = 1 - launcher;
@@ -1740,6 +1805,7 @@ function useTool(): void {
   player.eye(eye);
   player.look(dir);
   if (t.rifle) {
+    reportCrime('shot');
     const hit = castWorld(eye.toArray(), dir.toArray(), t.reach);
     const at = eye.clone().addScaledVector(dir, hit ? hit.t : 100);
     rifleTraces.fire(hand.muzzle(new THREE.Vector3(), RIFLE), at);
@@ -1862,6 +1928,7 @@ function burn(t: ToolSpec): void {
     for (let d = 0.1; d <= depth; d += step) hits.push({ at: eye.clone().addScaledVector(ray, h.t + d).toArray(), radius: t.radius, push: 0, core: t.core, topple: way });
   }
   const result = blasts(city, structure, physics, hits);
+  if (result.gone.length + result.loose.length > 0) reportCrime('damage');
   unsettled = true;
   afterBlast(result, hits);
   view.heat(cutFaces(result.gone), simTime);
@@ -2012,6 +2079,7 @@ function flyRockets(dt: number): void {
     if (pending[k].time > simTime) continue;
     const { at, radius, push } = pending.splice(k, 1)[0];
     const result = blast(city, structure, physics, at.toArray(), radius, push, 0.35);
+    if (result.gone.length + result.loose.length > 0) reportCrime('damage');
     unsettled = true;
     afterBlast(result, [{ at: at.toArray() }]);
     chips.burst(result.gone, at.toArray(), 5, push * 0.8);
@@ -2044,6 +2112,8 @@ function detonate(at: THREE.Vector3, t: ToolSpec, distance: number, normal?: Arr
     if (off < reach) hurtCar(0.45 * (1 - off / reach), at);
   }
   const result = blast(city, structure, physics, at.toArray(), t.radius, t.push, t.core);
+  if (t.explosive) reportCrime('explosion');
+  else if (!t.rifle && result.gone.length + result.loose.length > 0) reportCrime('damage');
   unsettled = true;
   afterBlast(result, [{ at: at.toArray() }]);
   chips.burst(result.gone, at.toArray(), t.explosive ? 1 : 3, t.push * 0.9 + 3);
@@ -2332,9 +2402,11 @@ function frame(now: number): void {
 /** One frame of the game at time `now` (ms): input, physics, effects, the render. */
 function tick(now: number): void {
   updateCityGuide();
+  wantedUI?.update(playing && ready && !rebuilding && !document.hidden);
   const began = performance.now();
   if (screenshotPaused || rebuilding || (ready && (!playing || document.hidden))) {
     if (!screenshotPaused) cityJobs?.update(0, false, { x: player.position.x, y: player.position.y, z: player.position.z, driving });
+    sounds.policeSiren(false);
     last = now;
     view.render();
     return;
@@ -2514,6 +2586,7 @@ function tick(now: number): void {
   view.update(player.position, sky.sunColor, sunStrength, sky.horizon);
   streetDetails?.update(city.state);
   urbanProps?.update(city);
+  updatePolice(sim);
   view.render();
   mission?.update(dt, playing && !document.hidden && !screenshotPaused && !rebuilding, city.state);
   if (mission) playerBoard.updateScore(mission.snapshot.count, mission.snapshot.mode === 'challenge');
@@ -2598,6 +2671,8 @@ if (testing) Object.assign(window, {
     get blastDetails() { return blastDetails; },
     get rifle() { return rifleMagazine; },
     get jobs() { return cityJobs; },
+    get police() { return cityPolice; },
+    get wanted() { return wanted; },
     get life() { return cityLife; },
     get ambience() { return cityAmbience; },
     get district() { return city.district; },
@@ -2637,6 +2712,8 @@ if (testing) Object.defineProperty(window, '__THREE_GAME_DIAGNOSTICS__', {
       rifle: { ...rifleMagazine.diagnostics, traces: rifleTraces.diagnostics },
       staticBuildings: cityBuildings.length,
       ambience: cityAmbience?.diagnostics ?? null,
+      police: cityPolice?.diagnostics ?? null,
+      wanted: wanted.diagnostics,
       cityLife: cityLife?.diagnostics ?? null,
       jobs: cityJobs?.diagnostics ?? null,
       vehicle: car ? { id: car.vehicleId, health: car.health, size: car.size, mass: car.mass } : null,
@@ -2653,6 +2730,9 @@ addEventListener('pagehide', () => {
   saveCityPose();
   car?.dispose();
   cityLife?.dispose();
+  cityPolice?.dispose();
+  wantedUI?.dispose();
+  sounds.disposePoliceSiren();
   cityAmbience?.dispose();
   districtSigns?.dispose();
   cityJobs?.dispose();

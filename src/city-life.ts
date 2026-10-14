@@ -50,6 +50,8 @@ export class CityLife {
     signalStops: 0, followStops: 0, pedestrianYields: 0, playerYields: 0, worldStops: 0,
     renderBatches: 7, resources: 10,
   };
+  extraCarBlocked: ((x:number,y:number,heading:number)=>boolean) | null = null;
+  extraPedestrianBlocked: ((x:number,y:number)=>boolean) | null = null;
   private city: City;
   private staticBoxes: readonly StaticBox[];
   private probe: Player;
@@ -162,8 +164,8 @@ export class CityLife {
 
   private createSimulation(): StreetSimulation {
     return new StreetSimulation({
-      carBlocked: (x, y, heading) => overlapsVehicle(this.staticBoxes, x, y, heading, 2.15, 0.92) || trafficOverlapsWorld(this.city, x, y, heading),
-      pedestrianBlocked: (x, y) => this.probe.blocked(x, y, 0, 1.8),
+      carBlocked: (x, y, heading) => overlapsVehicle(this.staticBoxes, x, y, heading, 2.15, 0.92) || trafficOverlapsWorld(this.city, x, y, heading) || !!this.extraCarBlocked?.(x,y,heading),
+      pedestrianBlocked: (x, y) => this.probe.blocked(x, y, 0, 1.8) || !!this.extraPedestrianBlocked?.(x,y),
     });
   }
 

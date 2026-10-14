@@ -28,6 +28,7 @@ export class Sounds {
   /** The jets' rush: one looping noise, its level and band set each frame they fire. */
   private jets: { band: BiquadFilterNode; gain: GainNode } | null = null;
   private noise: AudioBuffer | null = null;
+  private siren: { oscillator: OscillatorNode; gain: GainNode } | null = null;
   volume = 0.7;
   /**
    * Heard in space: no air to carry it, so what reaches you comes through the station's hull and your suit, dull
@@ -72,6 +73,28 @@ export class Sounds {
     this.volume = v;
     if (this.master) this.master.gain.value = v;
     if (this.suit) this.suit.gain.value = v;
+  }
+
+  /** One reusable siren, attenuated by distance; watchdog silences suspended/background frames. */
+  policeSiren(active: boolean, distance = 100): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.master) return;
+    if (!active && !this.siren) return;
+    if (!this.siren) {
+      const oscillator = ctx.createOscillator(), gain = ctx.createGain();
+      oscillator.type = 'triangle'; gain.gain.value = 0;
+      oscillator.connect(gain).connect(this.master); oscillator.start();
+      this.siren = { oscillator, gain };
+    }
+    const { oscillator, gain } = this.siren, t = ctx.currentTime;
+    oscillator.frequency.setTargetAtTime(Math.floor(t * 2) % 2 ? 760 : 560, t, .045);
+    gain.gain.cancelScheduledValues(t);
+    gain.gain.setTargetAtTime(active && Number.isFinite(distance) ? .06 / (1 + Math.max(0, distance) / 12) : 0, t, .04);
+    gain.gain.setTargetAtTime(0, t + .25, .06);
+  }
+  disposePoliceSiren(): void {
+    if (!this.siren) return;
+    this.siren.oscillator.stop(); this.siren.oscillator.disconnect(); this.siren.gain.disconnect(); this.siren = null;
   }
 
   /**

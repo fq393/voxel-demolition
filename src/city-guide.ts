@@ -12,6 +12,8 @@ export interface CityGuideFrame {
   readonly speed: number;
   readonly target?: readonly [number, number] | null;
   readonly traffic?: readonly { x: number; y: number; heading: number }[];
+  readonly police?: readonly { x: number; y: number; heading: number }[];
+  readonly garage?: readonly [number, number];
   readonly pedestrians?: readonly { x: number; y: number }[];
 }
 export interface CityGuideLandmark {
@@ -205,6 +207,12 @@ export class CityGuide {
       const [tx,ty] = this.point([pedestrian.x,pedestrian.y]);
       ctx.fillStyle='#a3c8a8';ctx.beginPath();ctx.arc(tx,ty,1.25,0,Math.PI*2);ctx.fill();
     }
+    for (const vehicle of frame.police ?? []) {
+      const [tx,ty]=this.point([vehicle.x,vehicle.y]);
+      ctx.save();ctx.translate(tx,ty);ctx.rotate(-vehicle.heading);ctx.fillStyle='#dce8ef';ctx.fillRect(-4,-2,8,4);
+      ctx.fillStyle='#86bce4';ctx.fillRect(-1,-2,2,2);ctx.fillStyle='#ec8175';ctx.fillRect(-1,0,2,2);ctx.restore();
+    }
+    if(frame.garage){const [gx,gy]=this.point(frame.garage);ctx.fillStyle='#9de0c4';ctx.beginPath();ctx.moveTo(gx,gy-5);ctx.lineTo(gx+5,gy);ctx.lineTo(gx+3,gy);ctx.lineTo(gx+3,gy+4);ctx.lineTo(gx-3,gy+4);ctx.lineTo(gx-3,gy);ctx.lineTo(gx-5,gy);ctx.closePath();ctx.fill();}
     if (frame.target) {
       const [tx, ty] = this.point(frame.target);
       ctx.strokeStyle = '#a0efd0'; ctx.fillStyle = '#3e8e72'; ctx.lineWidth = 2;
